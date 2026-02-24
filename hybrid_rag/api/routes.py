@@ -71,12 +71,27 @@ async def ingest_document_upload(
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     try:
         content = await file.read()
+        file_size_kb = round(len(content) / 1024, 1)
+        logger.info(
+            "ingest_upload_received",
+            filename=file.filename,
+            doc_id=doc_id,
+            size_kb=file_size_kb,
+        )
         with os.fdopen(tmp_fd, "wb") as fh:
             fh.write(content)
         stats = await ingest(tmp_path, doc_id)
+        logger.info(
+            "ingest_upload_complete",
+            doc_id=doc_id,
+            chunks=stats.get("chunks"),
+            entities=stats.get("entities"),
+            summaries=stats.get("summaries"),
+            communities=stats.get("communities"),
+        )
         return {"status": "success", **stats}
     except Exception as exc:
-        logger.error("ingest_upload_error", error=str(exc))
+        logger.error("ingest_upload_error", doc_id=doc_id, filename=file.filename, error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         if os.path.exists(tmp_path):
@@ -102,13 +117,21 @@ async def query(req: QueryRequest) -> QueryResponse:
     if req.doc_ids:
         session_ctx["cached_docs"] = req.doc_ids
 
+    logger.info(
+        "query_received",
+        query=req.query[:120],
+        doc_ids=req.doc_ids or "all",
+    )
+
     try:
         path = await query_router.route(req.query, session_ctx)
+        logger.info("query_routed", path=path, query=req.query[:80])
         answer = ""
         sources: List[Dict[str, Any]] = []
 
         # ── CAG path ──────────────────────────────────────────────────────────
         if path == "CAG":
+            logger.debug("cag_path", doc_ids=req.doc_ids)
             answer = await cag_engine.answer(req.query, req.doc_ids)
             sources = [{"doc_id": d} for d in (req.doc_ids or [])]
         # ── GLOBAL — community-first path for broad/thematic queries ───────────
@@ -117,6 +140,7 @@ async def query(req: QueryRequest) -> QueryResponse:
             from hybrid_rag.retrieval.rrf_merger import rrf_merge
             import asyncio as _asyncio
 
+            logger.debug("global_path_start", query=req.query[:80])
             comm_op = CommunitySearchOperator()
             vec_op = get_operator("VECTOR_SEARCH")
             comm_res, vec_res = await _asyncio.gather(
@@ -128,13 +152,21 @@ async def query(req: QueryRequest) -> QueryResponse:
             comm_list = comm_res if isinstance(comm_res, list) else []
             vec_list  = vec_res  if isinstance(vec_res,  list) else []
             all_results = rrf_merge([comm_list, vec_list])
+            logger.debug(
+                "global_path_results",
+                community_hits=len(comm_list),
+                vector_hits=len(vec_list),
+                merged_total=len(all_results),
+            )
             context = build_context(all_results, query=req.query)
             answer = await _llm_answer(context)
             sources = _extract_sources(all_results)
         # ── KAG_SIMPLE — single HYBRID step ───────────────────────────────────
         elif path == "KAG_SIMPLE":
+            logger.debug("kag_simple_path", query=req.query[:80])
             op = get_operator("HYBRID")
             results = await op.run(req.query, {"doc_id": (req.doc_ids or [None])[0]})
+            logger.debug("kag_simple_results", hits=len(results))
             context = build_context(results, query=req.query)
             answer = await _llm_answer(context)
             sources = _extract_sources(results)
@@ -142,6 +174,11 @@ async def query(req: QueryRequest) -> QueryResponse:
         # ── KAG — multi-step planning ─────────────────────────────────────────
         else:
             query_plan = plan(req.query)
+            logger.info(
+                "kag_plan_created",
+                steps=len(query_plan.steps),
+                operators=[s.operator.value for s in query_plan.steps],
+            )
             step_results: Dict[int, List[RetrievalResult]] = {}
             reasoning_steps: List[str] = []
             all_results: List[RetrievalResult] = []
@@ -152,12 +189,25 @@ async def query(req: QueryRequest) -> QueryResponse:
                 for dep_id in step.depends_on:
                     prior.extend(step_results.get(dep_id, []))
 
+                logger.debug(
+                    "kag_step_start",
+                    step_id=step.step_id,
+                    operator=step.operator.value,
+                    sub_query=step.sub_query[:80],
+                    depends_on=step.depends_on,
+                )
                 op = get_operator(step.operator.value)
                 ctx = {"prior_results": prior, "doc_id": (req.doc_ids or [None])[0]}
                 step_res = await op.run(step.sub_query, context=ctx)
                 step_results[step.step_id] = step_res
                 all_results.extend(step_res)
                 reasoning_steps.append(f"Step {step.step_id} [{step.operator}]: {step.sub_query}")
+                logger.debug(
+                    "kag_step_done",
+                    step_id=step.step_id,
+                    operator=step.operator.value,
+                    results=len(step_res),
+                )
 
             # Final answer via LLM
             context = build_context(
@@ -169,6 +219,13 @@ async def query(req: QueryRequest) -> QueryResponse:
             sources = _extract_sources(all_results)
 
         latency = time.time() * 1000 - start_ms
+        logger.info(
+            "query_complete",
+            path=path,
+            latency_ms=round(latency, 1),
+            sources=len(sources),
+            answer_chars=len(answer),
+        )
         return QueryResponse(
             answer=answer,
             sources=sources,
@@ -177,7 +234,7 @@ async def query(req: QueryRequest) -> QueryResponse:
         )
 
     except Exception as exc:
-        logger.error("query_api_error", error=str(exc))
+        logger.error("query_api_error", query=req.query[:80], error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -186,19 +243,24 @@ async def query(req: QueryRequest) -> QueryResponse:
 @router.post("/cache/preload", summary="Force CAG preload for a document")
 async def cache_preload(req: CachePreloadRequest) -> Dict[str, str]:
     from hybrid_rag.retrieval.cag_engine import cag_engine
+    logger.info("cache_preload_start", doc_id=req.doc_id)
     try:
         await cag_engine.preload(req.doc_id)
+        logger.info("cache_preload_done", doc_id=req.doc_id)
         return {"status": "preloaded", "doc_id": req.doc_id}
     except Exception as exc:
+        logger.error("cache_preload_error", doc_id=req.doc_id, error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-# ── DELETE /cache/{doc_id} ────────────────────────────────────────────────────
+# ── DELETE /cache/{doc_id} ──────────────────────────────────────────────────────
 
 @router.delete("/cache/{doc_id}", summary="Invalidate cache for a document")
 async def cache_invalidate(doc_id: str) -> Dict[str, str]:
     from hybrid_rag.retrieval.cag_engine import cag_engine
+    logger.info("cache_invalidate", doc_id=doc_id)
     await cag_engine.invalidate(doc_id)
+    logger.info("cache_invalidate_done", doc_id=doc_id)
     return {"status": "invalidated", "doc_id": doc_id}
 
 
@@ -211,6 +273,7 @@ async def health() -> HealthResponse:
     from hybrid_rag.storage.cache_manager import cache_manager
     from hybrid_rag.config import settings
 
+    logger.debug("health_check_start")
     results = await asyncio.gather(
         _check_neo4j(neo4j_client),
         _check_qdrant(qdrant_client),
@@ -222,6 +285,14 @@ async def health() -> HealthResponse:
     statuses = ["ok" if r is True else f"error: {type(r).__name__}: {r}" for r in results]
 
     overall = "healthy" if all(s == "ok" for s in statuses) else "degraded"
+    logger.info(
+        "health_check_complete",
+        status=overall,
+        neo4j=statuses[0],
+        qdrant=statuses[1],
+        redis=statuses[2],
+        groq=statuses[3],
+    )
     return HealthResponse(
         status=overall,
         neo4j=statuses[0],
