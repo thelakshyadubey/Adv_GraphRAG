@@ -90,6 +90,7 @@ async def ingest(file_path: str, doc_id: str) -> Dict:
 
     # ── 4-5-6. Extract, store, link ───────────────────────────────────────────
     all_entities: List[Entity] = []
+    all_relations: List[Relation] = []
     seen_entity_ids: set[str] = set()
 
     for chunk in all_chunks:
@@ -112,8 +113,10 @@ async def ingest(file_path: str, doc_id: str) -> Dict:
         for rel in relations:
             try:
                 await neo4j_client.create_relation(rel)
+                all_relations.append(rel)
             except Exception as exc:
                 logger.warning("relation_store_failed", error=str(exc))
+                all_relations.append(rel)  # keep for community detection even if Neo4j is down
 
         # Mutual index: link chunk ↔ entities + upsert chunk to Qdrant
         try:
@@ -128,6 +131,22 @@ async def ingest(file_path: str, doc_id: str) -> Dict:
             await qdrant_client.batch_upsert("summaries", summaries)
         except Exception as exc:
             logger.warning("summaries_upsert_failed", error=str(exc))
+
+    # ── 7b. Community detection + summarisation (GraphRAG) ────────────────────
+    community_summaries: list = []
+    if all_entities:
+        try:
+            from hybrid_rag.ingestion.community_builder import build_communities
+            community_summaries = build_communities(doc_id, all_entities, all_relations)
+            if community_summaries:
+                await qdrant_client.batch_upsert("summaries", community_summaries)
+                logger.info(
+                    "community_summaries_stored",
+                    doc_id=doc_id,
+                    count=len(community_summaries),
+                )
+        except Exception as exc:
+            logger.warning("community_build_failed", doc_id=doc_id, error=str(exc))
 
     # ── 8. Auto-CAG preload for small docs ────────────────────────────────────
     total_words = sum(len(c.text.split()) for c in all_chunks)
@@ -144,6 +163,7 @@ async def ingest(file_path: str, doc_id: str) -> Dict:
         "chunks": len(all_chunks),
         "entities": len(all_entities),
         "summaries": len(summaries),
+        "communities": len(community_summaries),
         "words": total_words,
     }
     logger.info("ingestion_complete", **stats)

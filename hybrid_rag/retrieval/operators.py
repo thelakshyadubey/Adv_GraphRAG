@@ -262,6 +262,38 @@ class SummaryOperator(BaseOperator):
             logger.error("summary_search_failed", error=str(exc))
             return []
 
+# ── 6. Community Search ───────────────────────────────────────────────────
+
+class CommunitySearchOperator(BaseOperator):
+    """
+    Search the pre-built GraphRAG community summaries stored in Qdrant.
+
+    Best used for broad/global/thematic queries such as:
+      "What are the main themes?"
+      "Summarize the key relationships."
+      "Give me an overview of this document."
+
+    Returns community-level summaries (result_type="community") that describe
+    clusters of related entities, enabling coherent answers to high-level questions.
+    """
+
+    async def run(
+        self, sub_query: str, context: Dict[str, Any] = None
+    ) -> List[RetrievalResult]:
+        from hybrid_rag.storage.qdrant_client import qdrant_client
+
+        ctx = context or {}
+        doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
+            [ctx["doc_id"]] if ctx.get("doc_id") else None
+        )
+        try:
+            q_vec = embedder.embed(sub_query)
+            results = await qdrant_client.search_communities(q_vec, doc_ids=doc_ids, limit=5)
+            logger.info("community_search_results", count=len(results))
+            return results
+        except Exception as exc:
+            logger.error("community_search_failed", error=str(exc))
+            return []
 
 # ── 6. LLM Reason ─────────────────────────────────────────────────────────────
 
@@ -306,6 +338,7 @@ REGISTRY: Dict[str, BaseOperator] = {
     "MULTI_HOP": MultiHopOperator(),
     "SUMMARY": SummaryOperator(),
     "LLM_REASON": LLMReasonOperator(),
+    "COMMUNITY_SEARCH": CommunitySearchOperator(),
 }
 
 

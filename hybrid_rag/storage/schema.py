@@ -21,6 +21,7 @@ class SummaryType(str, Enum):
     DOC = "doc"
     SECTION = "section"
     ENTITY = "entity"
+    COMMUNITY = "community"
 
 
 class OperatorType(str, Enum):
@@ -30,6 +31,7 @@ class OperatorType(str, Enum):
     MULTI_HOP = "MULTI_HOP"
     SUMMARY = "SUMMARY"
     LLM_REASON = "LLM_REASON"
+    COMMUNITY_SEARCH = "COMMUNITY_SEARCH"
 
 
 # ── Core document models ───────────────────────────────────────────────────────
@@ -69,6 +71,9 @@ class Summary(BaseModel):
     parent_id: str                   # doc_id, section name, or node_id
     text: str
     embedding: Optional[List[float]] = None
+    # Community-specific fields (populated by community_builder)
+    entity_names: List[str] = Field(default_factory=list)
+    community_id: Optional[int] = None
 
 
 # ── Query planning models ──────────────────────────────────────────────────────
@@ -94,6 +99,7 @@ class RetrievalResult(BaseModel):
     source_doc: Optional[str] = None
     source_page: Optional[int] = None
     node_ids: List[str] = Field(default_factory=list)
+    result_type: str = "chunk"    # "chunk" | "community" | "summary"
 
 
 # ── API request / response models ─────────────────────────────────────────────

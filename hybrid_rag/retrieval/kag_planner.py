@@ -19,17 +19,19 @@ logger = structlog.get_logger(__name__)
 PLANNER_PROMPT = """\
 Decompose the following query into a minimal set of reasoning steps.
 Available operators:
-  GRAPH_EXACT   - search for named entities in a knowledge graph
-  VECTOR_SEARCH - semantic vector similarity search over document chunks
-  HYBRID        - combined graph + vector search (best general-purpose)
-  MULTI_HOP     - multi-hop graph traversal for relationship chains
-  SUMMARY       - search over document and entity summaries
-  LLM_REASON    - use an LLM to reason over retrieved context (final step)
+  GRAPH_EXACT      - search for named entities in a knowledge graph
+  VECTOR_SEARCH    - semantic vector similarity search over document chunks
+  HYBRID           - combined graph + vector search (best general-purpose)
+  MULTI_HOP        - multi-hop graph traversal for relationship chains
+  SUMMARY          - search over document and entity summaries
+  COMMUNITY_SEARCH - search pre-built community summaries (use for broad/thematic/global queries)
+  LLM_REASON       - use an LLM to reason over retrieved context (final step)
 
 Rules:
 - Use the fewest steps necessary.
 - LLM_REASON should be the LAST step if included, and should have depends_on pointing to prior steps.
 - For simple queries, a single HYBRID step is sufficient.
+- For broad/thematic queries ("summarize", "main themes", "overview"), start with COMMUNITY_SEARCH.
 - Return ONLY valid JSON, no additional text.
 
 Format:

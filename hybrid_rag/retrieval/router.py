@@ -20,6 +20,16 @@ _COMPLEX_WORDS = [
     "why", "explain", "relationship", "impact", "effect", "cause",
 ]
 
+_GLOBAL_WORDS = [
+    "overview", "summarize", "summarise", "summary", "overall",
+    "main theme", "main themes", "main topic", "main topics",
+    "key theme", "key topics", "key ideas", "key concepts",
+    "across", "throughout", "entire document", "whole document",
+    "what is this about", "what are the key", "what are the main",
+    "high-level", "broad", "generally", "in general",
+    "landscape", "big picture", "at a high level",
+]
+
 
 def _any_doc_matches(query: str, cached_docs: List[str]) -> bool:
     q_lower = query.lower()
@@ -53,6 +63,12 @@ async def route(query: str, session_ctx: Dict | None = None) -> str:
     if cached_docs and _any_doc_matches(query, cached_docs):
         logger.info("router_decision", decision="CAG", reason="cached_doc_match")
         return "CAG"
+
+    # ── GLOBAL signals (broad/thematic — use community summaries) ────────────
+
+    if any(w in q_lower for w in _GLOBAL_WORDS):
+        logger.info("router_decision", decision="GLOBAL", reason="thematic_keywords")
+        return "GLOBAL"
 
     # ── KAG complex signals ───────────────────────────────────────────────────
 

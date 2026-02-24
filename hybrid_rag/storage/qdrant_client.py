@@ -128,15 +128,20 @@ class QdrantVectorClient:
     async def upsert_summary(self, summary: Summary) -> None:
         if summary.embedding is None:
             return
+        payload: dict = {
+            "summary_id": summary.summary_id,
+            "summary_type": summary.summary_type.value,
+            "parent_id": summary.parent_id,
+            "text": summary.text,
+        }
+        if summary.entity_names:
+            payload["entity_names"] = summary.entity_names
+        if summary.community_id is not None:
+            payload["community_id"] = summary.community_id
         point = qdrant_models.PointStruct(
             id=self._to_qdrant_id(summary.summary_id),
             vector=summary.embedding,
-            payload={
-                "summary_id": summary.summary_id,
-                "summary_type": summary.summary_type.value,
-                "parent_id": summary.parent_id,
-                "text": summary.text,
-            },
+            payload=payload,
         )
         await self._client.upsert(collection_name="summaries", points=[point])
 
@@ -179,15 +184,20 @@ class QdrantVectorClient:
             elif isinstance(item, Summary):
                 if item.embedding is None:
                     continue
+                payload: dict = {
+                    "summary_id": item.summary_id,
+                    "summary_type": item.summary_type.value,
+                    "parent_id": item.parent_id,
+                    "text": item.text,
+                }
+                if item.entity_names:
+                    payload["entity_names"] = item.entity_names
+                if item.community_id is not None:
+                    payload["community_id"] = item.community_id
                 points.append(qdrant_models.PointStruct(
                     id=self._to_qdrant_id(item.summary_id),
                     vector=item.embedding,
-                    payload={
-                        "summary_id": item.summary_id,
-                        "summary_type": item.summary_type.value,
-                        "parent_id": item.parent_id,
-                        "text": item.text,
-                    },
+                    payload=payload,
                 ))
 
         if points:
@@ -213,6 +223,51 @@ class QdrantVectorClient:
             return [self._hit_to_result(h) for h in result.points]
         except Exception as exc:
             logger.error("search_chunks_failed", error=str(exc))
+            return []
+
+    async def search_communities(
+        self,
+        query_vec: List[float],
+        doc_ids: Optional[List[str]] = None,
+        limit: int = 5,
+    ) -> List[RetrievalResult]:
+        """Search community summaries in Qdrant for global/thematic queries."""
+        must_conditions = [
+            qdrant_models.FieldCondition(
+                key="summary_type",
+                match=qdrant_models.MatchValue(value="community"),
+            )
+        ]
+        if doc_ids:
+            must_conditions.append(
+                qdrant_models.FieldCondition(
+                    key="parent_id",
+                    match=qdrant_models.MatchAny(any=doc_ids),
+                )
+            )
+        qdrant_filter = qdrant_models.Filter(must=must_conditions)
+        try:
+            result = await self._client.query_points(
+                collection_name="summaries",
+                query=query_vec,
+                query_filter=qdrant_filter,
+                limit=limit,
+                with_payload=True,
+            )
+            results = []
+            for h in result.points:
+                p = h.payload or {}
+                results.append(RetrievalResult(
+                    id=p.get("summary_id", str(h.id)),
+                    text=p.get("text", ""),
+                    score=h.score,
+                    source_doc=p.get("parent_id"),
+                    result_type="community",
+                    node_ids=p.get("entity_names", []),
+                ))
+            return results
+        except Exception as exc:
+            logger.error("search_communities_failed", error=str(exc))
             return []
 
     async def search_summaries(

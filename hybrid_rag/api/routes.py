@@ -78,7 +78,26 @@ async def query(req: QueryRequest) -> QueryResponse:
         if path == "CAG":
             answer = await cag_engine.answer(req.query, req.doc_ids)
             sources = [{"doc_id": d} for d in (req.doc_ids or [])]
+        # ── GLOBAL — community-first path for broad/thematic queries ───────────
+        elif path == "GLOBAL":
+            from hybrid_rag.retrieval.operators import CommunitySearchOperator
+            from hybrid_rag.retrieval.rrf_merger import rrf_merge
+            import asyncio as _asyncio
 
+            comm_op = CommunitySearchOperator()
+            vec_op = get_operator("VECTOR_SEARCH")
+            comm_res, vec_res = await _asyncio.gather(
+                comm_op.run(req.query, {"doc_ids": req.doc_ids,
+                                        "doc_id": (req.doc_ids or [None])[0]}),
+                vec_op.run(req.query, {"doc_id": (req.doc_ids or [None])[0]}),
+                return_exceptions=True,
+            )
+            comm_list = comm_res if isinstance(comm_res, list) else []
+            vec_list  = vec_res  if isinstance(vec_res,  list) else []
+            all_results = rrf_merge([comm_list, vec_list])
+            context = build_context(all_results, query=req.query)
+            answer = await _llm_answer(context)
+            sources = _extract_sources(all_results)
         # ── KAG_SIMPLE — single HYBRID step ───────────────────────────────────
         elif path == "KAG_SIMPLE":
             op = get_operator("HYBRID")

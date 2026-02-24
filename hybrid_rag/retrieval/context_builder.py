@@ -27,13 +27,29 @@ def build(
     sections: List[str] = []
 
     # ── Retrieved chunks ──────────────────────────────────────────────────────
-    if results:
-        chunk_lines: List[str] = []
+    # Separate community summaries from regular chunks (treated differently in context)
+    community_results = [r for r in results if r.result_type == "community"]
+    chunk_results = [r for r in results if r.result_type != "community"]
+
+    # Community overview section (put first — sets the thematic frame)
+    if community_results:
+        comm_lines: List[str] = []
         seen_ids: set[str] = set()
-        for r in results:
+        for r in community_results:
             if r.id in seen_ids:
                 continue
             seen_ids.add(r.id)
+            source_info = f"[Community summary, doc: {r.source_doc}]" if r.source_doc else "[Community summary]"
+            comm_lines.append(f"{source_info}\n{r.text.strip()}")
+        sections.append("COMMUNITY OVERVIEW (high-level themes and entity clusters):\n" + "\n\n".join(comm_lines))
+
+    if chunk_results:
+        chunk_lines: List[str] = []
+        seen_ids2: set[str] = set()
+        for r in chunk_results:
+            if r.id in seen_ids2:
+                continue
+            seen_ids2.add(r.id)
             source_info = ""
             if r.source_doc:
                 source_info = f"[Source: {r.source_doc}"
