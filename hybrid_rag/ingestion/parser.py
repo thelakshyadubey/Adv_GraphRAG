@@ -58,10 +58,53 @@ def parse(file_path: str) -> ParsedDocument:
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
 
+# Minimum characters to consider a page "has real text" (not noise)
+_OCR_TEXT_THRESHOLD = 20
+
+# Lazy singleton — easyocr reader loads model only once across all pages/calls
+_easyocr_reader = None
+
+
+def _get_ocr_reader():
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        try:
+            import easyocr  # type: ignore
+            logger.info("ocr_model_loading", engine="easyocr")
+            _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+            logger.info("ocr_model_ready")
+        except ImportError:
+            logger.warning("easyocr_not_installed", msg="pip install easyocr")
+            _easyocr_reader = False  # sentinel: don't retry
+    return _easyocr_reader if _easyocr_reader is not False else None
+
+
+def _ocr_page(page) -> str:
+    """
+    Render a PyMuPDF page to a numpy array and run easyocr.
+    Called only for image-only / scanned pages.
+    """
+    reader = _get_ocr_reader()
+    if reader is None:
+        return ""
+
+    import numpy as np  # type: ignore
+
+    # Render at 150 DPI — good quality/speed balance
+    mat = page.get_pixmap(dpi=150)
+    img = np.frombuffer(mat.samples, dtype=np.uint8).reshape(mat.height, mat.width, mat.n)
+    if mat.n == 4:
+        img = img[:, :, :3]
+
+    result = reader.readtext(img, detail=0)  # detail=0 → list of strings, faster
+    return "\n".join(result)
+
+
 def _parse_pdf(file_path: str) -> ParsedDocument:
     """
     Fast PDF parser using PyMuPDF (fitz).
-    Typically 10-50x faster than pdfplumber for large documents.
+    - Native text PDFs: ~5-50ms/page
+    - Scanned/image PDFs: automatic OCR fallback via easyocr (model loaded once)
     """
     try:
         import fitz  # type: ignore  (PyMuPDF)
@@ -70,36 +113,59 @@ def _parse_pdf(file_path: str) -> ParsedDocument:
 
     pages: List[str] = []
     tables: List[str] = []
+    ocr_pages = 0
 
     doc = fitz.open(file_path)
     try:
-        for page in doc:
-            # "text" mode: fastest plain-text extraction (pure C, no layout analysis)
-            page_text: str = page.get_text("text") or ""
+        # First pass: identify which pages need OCR, render all at once if needed
+        page_texts: List[str] = []
+        scanned_indices: List[int] = []
 
-            # Lightweight table detection via block geometry (no ML, very fast)
-            for block in page.get_text("blocks"):
-                # block = (x0, y0, x1, y1, text, block_no, block_type)
-                # block_type 0 = text, 1 = image — skip images
-                if block[6] != 0:
-                    continue
-                blk_text = block[4].strip()
-                lines = blk_text.splitlines()
-                # Treat as a table if it has 2+ lines where most lines are multi-column
-                if len(lines) >= 2 and sum(len(l.split()) >= 3 for l in lines) >= 2:
-                    tables.append(blk_text)
+        for i, page in enumerate(doc):
+            txt = page.get_text("text") or ""
+            page_texts.append(txt)
+            if len(txt.strip()) < _OCR_TEXT_THRESHOLD:
+                scanned_indices.append(i)
+
+        if scanned_indices:
+            logger.info(
+                "pdf_scanned_detected",
+                scanned_pages=len(scanned_indices),
+                total_pages=doc.page_count,
+            )
+            # Pre-warm the OCR model before looping pages (loads weights once)
+            _get_ocr_reader()
+
+        for i, page in enumerate(doc):
+            if i in scanned_indices:
+                page_text = _ocr_page(page)
+                ocr_pages += 1
+            else:
+                page_text = page_texts[i]
+                # Lightweight table detection for native-text pages
+                for block in page.get_text("blocks"):
+                    if block[6] != 0:  # skip image blocks
+                        continue
+                    blk_text = block[4].strip()
+                    lines = blk_text.splitlines()
+                    if len(lines) >= 2 and sum(len(l.split()) >= 3 for l in lines) >= 2:
+                        tables.append(blk_text)
 
             pages.append(page_text)
     finally:
         doc.close()
+
+    if ocr_pages:
+        logger.info("pdf_ocr_complete", ocr_pages=ocr_pages, total_pages=len(pages))
 
     full_text = "\n\n".join(pages)
     return ParsedDocument(
         text=full_text,
         pages=pages,
         tables=tables,
-        metadata={"page_count": len(pages)},
+        metadata={"page_count": len(pages), "ocr_pages": ocr_pages},
     )
+
 
 
 # ── DOCX ──────────────────────────────────────────────────────────────────────

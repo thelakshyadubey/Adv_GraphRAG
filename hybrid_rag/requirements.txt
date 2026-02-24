@@ -27,6 +27,7 @@ sentence-transformers>=3.0.0
 
 # Document parsing
 pymupdf>=1.24.0
+easyocr>=1.7.2           # OCR fallback for scanned/image PDFs
 python-docx>=1.1.0
 beautifulsoup4>=4.12.0
 
