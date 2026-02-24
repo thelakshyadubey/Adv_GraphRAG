@@ -11,6 +11,14 @@ from hybrid_rag.logging_config import setup_logging
 setup_logging(log_level="DEBUG")
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Set HuggingFace token before any HF/sentence-transformers imports ─────────
+import os as _os
+from hybrid_rag.config import settings as _settings
+if _settings.hf_token:
+    _os.environ.setdefault("HF_TOKEN", _settings.hf_token)
+    _os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", _settings.hf_token)
+# ─────────────────────────────────────────────────────────────────────────────
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 

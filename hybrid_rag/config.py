@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # all-MiniLM-L6-v2 → 384  |  nomic-ai/nomic-embed-text-v1.5 → 768
     embedding_dim: int = 384
 
+    # ── HuggingFace ────────────────────────────────────────────────────────────
+    hf_token: Optional[str] = None          # set HF_TOKEN in .env to avoid rate limits
+
     # ── Chunking ───────────────────────────────────────────────────────────────
     chunk_size: int = 512
     chunk_overlap: int = 64
