@@ -1,0 +1,40 @@
+# fastapi + uvicorn
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+aiofiles>=23.0.0
+sentence-transformers>=2.7.0
+torch>=2.0.0
+
+# pydantic
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# Neo4j async driver
+neo4j>=5.20.0
+
+# Qdrant
+qdrant-client>=1.9.0
+
+# Redis (async)
+redis>=5.0.0
+
+# Groq Python SDK
+groq>=0.9.0
+
+# Embeddings (local — Groq has no embeddings API)
+sentence-transformers>=3.0.0
+
+# Document parsing
+pdfplumber>=0.11.0
+python-docx>=1.1.0
+beautifulsoup4>=4.12.0
+
+# Utilities
+tiktoken>=0.7.0
+structlog>=24.2.0
+numpy>=1.26.0
+
+# Testing
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0          # for FastAPI TestClient async

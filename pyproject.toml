@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "hybrid_rag"
+version = "1.0.0"
+description = "Production-grade Hybrid RAG: GraphRAG + KAG + CAG"
+requires-python = ">=3.11"
+dependencies = []   # see requirements.txt for full dep list
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hybrid_rag*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["hybrid_rag/tests"]
