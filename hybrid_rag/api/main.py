@@ -6,6 +6,11 @@ Shutdown: gracefully close all connections.
 """
 from __future__ import annotations
 
+# ── Logging must be configured before any other local imports ─────────────────
+from hybrid_rag.logging_config import setup_logging
+setup_logging(log_level="DEBUG")
+# ─────────────────────────────────────────────────────────────────────────────
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 
