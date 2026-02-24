@@ -36,18 +36,37 @@ class Neo4jClient:
     # ── Index setup ───────────────────────────────────────────────────────────
 
     async def create_indexes(self) -> None:
-        queries = [
-            # Standard index on node_id for all Entity nodes
-            "CREATE INDEX entity_node_id IF NOT EXISTS FOR (e:Entity) ON (e.node_id)",
-            # Fulltext index on name for fuzzy search
-            "CREATE FULLTEXT INDEX entity_name_ft IF NOT EXISTS FOR (e:Entity) ON EACH [e.name]",
-        ]
         async with self._driver.session() as session:
-            for q in queries:
+            # Standard property index
+            try:
+                await session.run(
+                    "CREATE INDEX entity_node_id IF NOT EXISTS FOR (e:Entity) ON (e.node_id)"
+                )
+            except Exception as exc:
+                logger.warning("index_creation_skipped", index="entity_node_id", error=str(exc))
+
+            # Fulltext index — drop and recreate if it somehow ended up in a bad state
+            try:
+                await session.run(
+                    "CREATE FULLTEXT INDEX entity_name_ft IF NOT EXISTS FOR (e:Entity) ON EACH [e.name]"
+                )
+                logger.info("fulltext_index_ensured", index="entity_name_ft")
+            except Exception as exc:
+                # Some Neo4j versions reject IF NOT EXISTS for fulltext — try without it
+                logger.warning("fulltext_index_create_failed", error=str(exc))
                 try:
-                    await session.run(q)
-                except Exception as exc:
-                    logger.warning("index_creation_skipped", query=q, error=str(exc))
+                    await session.run(
+                        "CREATE FULLTEXT INDEX entity_name_ft FOR (e:Entity) ON EACH [e.name]"
+                    )
+                    logger.info("fulltext_index_created_fallback", index="entity_name_ft")
+                except Exception as exc2:
+                    logger.warning("fulltext_index_already_exists_or_failed", error=str(exc2))
+
+            # Wait for all indexes to come online (important for AuraDB / cloud)
+            try:
+                await session.run("CALL db.awaitIndexes(120)")
+            except Exception:
+                pass  # older Neo4j versions may not support this
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
 
@@ -149,7 +168,13 @@ class Neo4jClient:
             LIMIT 10
             """
         else:
-            query = "MATCH (e:Entity {name: $name}) RETURN e AS node"
+            # Substring match — used as fallback when fulltext index unavailable
+            query = """
+            MATCH (e:Entity)
+            WHERE toLower(e.name) CONTAINS toLower($name)
+            RETURN e AS node
+            LIMIT 10
+            """
         try:
             async with self._driver.session() as session:
                 result = await session.run(query, name=name)
@@ -165,7 +190,15 @@ class Neo4jClient:
                     ))
                 return entities
         except Exception as exc:
-            logger.error("search_by_name_failed", name=name, error=str(exc))
+            err_str = str(exc)
+            # Fulltext index missing — fall back to case-insensitive CONTAINS search
+            if fuzzy and "entity_name_ft" in err_str:
+                logger.warning(
+                    "fulltext_index_missing_fallback",
+                    detail="entity_name_ft not found, using CONTAINS match",
+                )
+                return await self.search_by_name(name, fuzzy=False)
+            logger.error("search_by_name_failed", name=name, error=err_str)
             return []
 
     # ── Traversal ─────────────────────────────────────────────────────────────
