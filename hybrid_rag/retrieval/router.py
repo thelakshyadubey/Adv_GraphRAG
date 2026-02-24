@@ -45,6 +45,7 @@ async def route(query: str, session_ctx: Dict | None = None) -> str:
     from hybrid_rag.storage.cache_manager import cache_manager
 
     ctx = session_ctx or {}
+    q_lower = query.lower()   # defined once, used by both GLOBAL and KAG checks
 
     # ── CAG signals ───────────────────────────────────────────────────────────
 
@@ -72,7 +73,6 @@ async def route(query: str, session_ctx: Dict | None = None) -> str:
 
     # ── KAG complex signals ───────────────────────────────────────────────────
 
-    q_lower = query.lower()
     if any(w in q_lower for w in _COMPLEX_WORDS):
         logger.info("router_decision", decision="KAG", reason="complex_keywords")
         return "KAG"
