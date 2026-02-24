@@ -14,8 +14,12 @@ import asyncio
 import time
 from typing import Any, Dict, List
 
+import os
+import pathlib
+import tempfile
+
 import structlog
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 
 from hybrid_rag.storage.schema import (
     CachePreloadRequest,
@@ -48,6 +52,35 @@ async def ingest_document(req: IngestRequest) -> Dict[str, Any]:
     except Exception as exc:
         logger.error("ingest_api_error", error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── /ingest/upload ────────────────────────────────────────────────────────────
+
+@router.post("/ingest/upload", summary="Ingest a document via file upload")
+async def ingest_document_upload(
+    file: UploadFile = File(...),
+    doc_id: str = Form(...),
+) -> dict:
+    """
+    Accept a multipart file upload, persist to a temp file, run the full
+    ingestion pipeline, then delete the temp file.
+    """
+    from hybrid_rag.ingestion.pipeline import ingest
+
+    suffix = pathlib.Path(file.filename or "upload").suffix or ".bin"
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        content = await file.read()
+        with os.fdopen(tmp_fd, "wb") as fh:
+            fh.write(content)
+        stats = await ingest(tmp_path, doc_id)
+        return {"status": "success", **stats}
+    except Exception as exc:
+        logger.error("ingest_upload_error", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 # ── /query ────────────────────────────────────────────────────────────────────

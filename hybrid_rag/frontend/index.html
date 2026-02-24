@@ -444,13 +444,6 @@
       <p class="subtitle">Select one or more files. Doc IDs are auto-filled from filenames and can be edited before ingesting.</p>
 
       <div class="card">
-        <div class="dir-row">
-          <div class="field">
-            <label>Base Directory <span style="font-size:11px;text-transform:none;color:var(--muted)">(folder where your files live)</span></label>
-            <input id="baseDir" placeholder="e.g. C:\Users\Lakshya\Desktop\Docs" oninput="saveBaseDir()" />
-          </div>
-        </div>
-
         <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()"
              ondragover="dzDrag(event,true)" ondragleave="dzDrag(event,false)" ondrop="dzDrop(event)">
           <div class="dz-icon">&#128193;</div>
@@ -465,7 +458,6 @@
             <thead>
               <tr>
                 <th>File Name</th>
-                <th>Full Path (editable)</th>
                 <th>Doc ID (editable)</th>
                 <th>Status</th>
                 <th></th>
@@ -617,9 +609,6 @@ function addIngestedDoc(docId) {
     renderDocDropdowns();
   }
 }
-function saveBaseDir() {
-  localStorage.setItem('baseDir', document.getElementById('baseDir').value);
-}
 
 // Tab switching
 function switchTab(name, btn) {
@@ -677,23 +666,15 @@ async function checkHealth() {
 }
 
 // File queue
-function getBaseDir() {
-  return document.getElementById('baseDir').value.trim().replace(/[\/\\]+$/, '');
-}
 function fileNameToDocId(name) {
   return name.replace(/\.[^.]+$/, '').replace(/[\s.\-]+/g, '_').toLowerCase();
-}
-function guessFullPath(name) {
-  const base = getBaseDir();
-  if (!base) return name;
-  const sep = base.indexOf('/') >= 0 ? '/' : '\\';
-  return base + sep + name;
 }
 function addFilesToQueue(files) {
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const rowId = 'row-' + (++rowCounter);
-    fileQueue.push({ name: file.name, path: guessFullPath(file.name), docId: fileNameToDocId(file.name), status: 'pending', rowId: rowId });
+    // Store the real File object so we can upload bytes directly (no path needed)
+    fileQueue.push({ name: file.name, file: file, docId: fileNameToDocId(file.name), status: 'pending', rowId: rowId });
   }
   renderQueue();
   document.getElementById('fileInput').value = '';
@@ -706,7 +687,6 @@ function renderQueue() {
   tbody.innerHTML = fileQueue.map(function(item) {
     return '<tr id="' + item.rowId + '">' +
       '<td class="fname" title="' + escHtml(item.name) + '">' + escHtml(item.name) + '</td>' +
-      '<td><input type="text" value="' + escHtml(item.path) + '" oninput="updateQueueItem(\'' + item.rowId + '\',\'path\',this.value)" style="width:260px;" /></td>' +
       '<td><input type="text" value="' + escHtml(item.docId) + '" oninput="updateQueueItem(\'' + item.rowId + '\',\'docId\',this.value)" /></td>' +
       '<td><span class="status-pill sp-' + item.status + '">' + item.status + '</span></td>' +
       '<td><button class="del-btn" onclick="removeFromQueue(\'' + item.rowId + '\')" title="Remove">&#10005;</button></td>' +
@@ -751,11 +731,16 @@ async function ingestAll() {
   let done = 0;
   for (const item of pending) {
     if (!item.docId.trim()) { appendLog(log, 'err', 'Skipped (empty doc ID): ' + item.name); continue; }
-    if (!item.path.trim())  { appendLog(log, 'err', 'Skipped (empty path): '   + item.name); continue; }
     setRowStatus(item.rowId, 'running');
-    appendLog(log, 'info', '-> [' + item.docId + '] ' + item.path);
+    appendLog(log, 'info', '-> [' + item.docId + '] ' + item.name);
     try {
-      const data = await api('POST', '/ingest', { file_path: item.path, doc_id: item.docId });
+      // Upload the actual file bytes — no server-side path needed
+      const fd = new FormData();
+      fd.append('file', item.file, item.name);
+      fd.append('doc_id', item.docId);
+      const res = await fetch(API() + '/ingest/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
       setRowStatus(item.rowId, 'done');
       appendLog(log, 'ok', '  chunks=' + data.chunks + '  entities=' + data.entities + '  summaries=' + data.summaries + '  communities=' + (data.communities || 0));
       addIngestedDoc(item.docId);
@@ -1001,9 +986,6 @@ document.addEventListener('keydown', function(e) {
 
 // Init
 document.addEventListener('DOMContentLoaded', function() {
-  const savedDir = localStorage.getItem('baseDir');
-  if (savedDir) document.getElementById('baseDir').value = savedDir;
-
   const grid = document.getElementById('healthGrid');
   [{ id:'neo4j',label:'Neo4j' },{ id:'qdrant',label:'Qdrant' },
    { id:'redis',label:'Redis' },{ id:'groq',label:'Groq LLM' }].forEach(function(s) {
