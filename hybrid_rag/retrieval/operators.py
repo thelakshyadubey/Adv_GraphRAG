@@ -311,9 +311,12 @@ class LLMReasonOperator(BaseOperator):
 
         context_text = "\n\n".join(r.text for r in prior[:8])
         prompt = (
-            f"Given the following context:\n\n{context_text}\n\n"
-            f"Answer the question: {sub_query}\n\n"
-            "If the context does not contain enough information, say so."
+            f"Context:\n\n{context_text}\n\n"
+            f"Question: {sub_query}\n\n"
+            "Give a direct, specific answer using the facts in the context above. "
+            "State the answer as a plain fact — do NOT say 'the context says', "
+            "'the context mentions', or 'the context does not explicitly'. "
+            "If the context contains relevant facts, use them confidently."
         )
         try:
             answer = _llm_call(prompt, max_tokens=1024)

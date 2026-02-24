@@ -78,14 +78,21 @@ def build(
         sections.append(f"QUESTION: {query}")
 
     sections.append(
-        "Instructions: Using ONLY the context provided above, write a thorough and "
-        "insightful answer. You are allowed to synthesize, infer, and reason across "
-        "multiple pieces of context to form a cohesive answer — do not just quote "
-        "verbatim. If the context contains relevant facts, use them to answer fully "
-        "even if the exact wording of the question isn't present. "
-        "Cite source document and page number inline when available (e.g. [Source: docname, page N]). "
-        "Only say the information is unavailable if the context genuinely contains "
-        "no facts relevant to the question."
+        "INSTRUCTIONS:\n"
+        "Answer the QUESTION above using the retrieved context. Rules:\n"
+        "1. Give a direct, specific, declarative answer — lead with the answer itself, not a preamble.\n"
+        "2. Synthesize and reason across multiple context chunks; draw connections even when implicit.\n"
+        "3. NEVER use these phrases (they are forbidden):\n"
+        "   - 'the context does not explicitly'\n"
+        "   - 'although the context'\n"
+        "   - 'the context does not mention'\n"
+        "   - 'based on the context'\n"
+        "   - 'the context says'\n"
+        "   - 'not explicitly stated'\n"
+        "   - 'while not explicitly'\n"
+        "4. State facts directly as facts, not as 'the document states that…'\n"
+        "5. Cite source inline as [doc: name, page N] when available.\n"
+        "6. If and only if the context contains zero relevant facts, write: 'Insufficient context to answer.'"
     )
 
     return "\n\n".join(sections)
