@@ -59,30 +59,39 @@ def parse(file_path: str) -> ParsedDocument:
 # ── PDF ───────────────────────────────────────────────────────────────────────
 
 def _parse_pdf(file_path: str) -> ParsedDocument:
+    """
+    Fast PDF parser using PyMuPDF (fitz).
+    Typically 10-50x faster than pdfplumber for large documents.
+    """
     try:
-        import pdfplumber  # type: ignore
+        import fitz  # type: ignore  (PyMuPDF)
     except ImportError:
-        raise ImportError("pdfplumber is required for PDF parsing: pip install pdfplumber")
+        raise ImportError("PyMuPDF is required for PDF parsing: pip install pymupdf")
 
     pages: List[str] = []
     tables: List[str] = []
 
-    with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            pages.append(page_text)
+    doc = fitz.open(file_path)
+    try:
+        for page in doc:
+            # "text" mode: fastest plain-text extraction (pure C, no layout analysis)
+            page_text: str = page.get_text("text") or ""
 
-            # Extract tables
-            for table in page.extract_tables():
-                if table:
-                    header = table[0] if table else []
-                    rows = table[1:] if len(table) > 1 else []
-                    table_lines = [" | ".join(str(c) for c in header)]
-                    for row in rows:
-                        table_lines.append(" | ".join(str(c) if c else "" for c in row))
-                    table_text = "\n".join(table_lines)
-                    tables.append(table_text)
-                    page_text += f"\n\n[TABLE]\n{table_text}\n[/TABLE]"
+            # Lightweight table detection via block geometry (no ML, very fast)
+            for block in page.get_text("blocks"):
+                # block = (x0, y0, x1, y1, text, block_no, block_type)
+                # block_type 0 = text, 1 = image — skip images
+                if block[6] != 0:
+                    continue
+                blk_text = block[4].strip()
+                lines = blk_text.splitlines()
+                # Treat as a table if it has 2+ lines where most lines are multi-column
+                if len(lines) >= 2 and sum(len(l.split()) >= 3 for l in lines) >= 2:
+                    tables.append(blk_text)
+
+            pages.append(page_text)
+    finally:
+        doc.close()
 
     full_text = "\n\n".join(pages)
     return ParsedDocument(
