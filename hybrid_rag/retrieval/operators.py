@@ -68,6 +68,12 @@ class GraphExactOperator(BaseOperator):
     ) -> List[RetrievalResult]:
         from hybrid_rag.storage.neo4j_client import neo4j_client
         from hybrid_rag.storage.qdrant_client import qdrant_client
+        from qdrant_client.http import models as qm  # type: ignore
+
+        ctx = context or {}
+        doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
+            [ctx["doc_id"]] if ctx.get("doc_id") else None
+        )
 
         try:
             entities: List[Entity] = await neo4j_client.search_by_name(sub_query, fuzzy=True)
@@ -78,9 +84,11 @@ class GraphExactOperator(BaseOperator):
             for entity in entities[:5]:
                 chunk_ids = await neo4j_client.get_chunks_for_node(entity.node_id)
                 for cid in chunk_ids[:3]:
-                    # Fetch chunk text from Qdrant by chunk_id
-                    from qdrant_client.http import models as qm  # type: ignore
-                    flt = qm.Filter(must=[qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))])
+                    # Fetch chunk text from Qdrant filtered by chunk_id AND doc scope
+                    must = [qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))]
+                    if doc_ids:
+                        must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids)))
+                    flt = qm.Filter(must=must)
                     records, _ = await qdrant_client._client.scroll(
                         collection_name="chunks",
                         scroll_filter=flt,
@@ -122,10 +130,12 @@ class VectorSearchOperator(BaseOperator):
         ctx = context or {}
         try:
             q_vec = embedder.embed(sub_query)
-            filters: Optional[Dict] = None
-            if ctx.get("doc_id"):
-                filters = {"doc_id": ctx["doc_id"]}
-            results = await qdrant_client.search_chunks(q_vec, filters=filters, limit=limit)
+            doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
+                [ctx["doc_id"]] if ctx.get("doc_id") else None
+            )
+            results = await qdrant_client.search_chunks(
+                q_vec, doc_ids=doc_ids, limit=limit
+            )
             logger.info("vector_search_results", count=len(results))
             return results
         except Exception as exc:
@@ -169,9 +179,16 @@ class HybridOperator(BaseOperator):
             # Fetch expanded chunks from Qdrant (best effort)
             from hybrid_rag.storage.qdrant_client import qdrant_client
             from qdrant_client.http import models as qm  # type: ignore
+            ctx = context or {}
+            doc_ids_ctx: Optional[List[str]] = ctx.get("doc_ids") or (
+                [ctx["doc_id"]] if ctx.get("doc_id") else None
+            )
             extra: List[RetrievalResult] = []
             for cid in expanded_ids[:5]:
-                flt = qm.Filter(must=[qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))])
+                must = [qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))]
+                if doc_ids_ctx:
+                    must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids_ctx)))
+                flt = qm.Filter(must=must)
                 records, _ = await qdrant_client._client.scroll(
                     collection_name="chunks", scroll_filter=flt,
                     limit=1, with_payload=True, with_vectors=False,
@@ -222,8 +239,15 @@ class MultiHopOperator(BaseOperator):
                     hop_chunk_ids.add(cid)
 
             from qdrant_client.http import models as qm  # type: ignore
+            ctx = context or {}
+            doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
+                [ctx["doc_id"]] if ctx.get("doc_id") else None
+            )
             for cid in list(hop_chunk_ids)[:10]:
-                flt = qm.Filter(must=[qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))])
+                must = [qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))]
+                if doc_ids:
+                    must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids)))
+                flt = qm.Filter(must=must)
                 records, _ = await qdrant_client._client.scroll(
                     collection_name="chunks", scroll_filter=flt,
                     limit=1, with_payload=True, with_vectors=False,

@@ -33,7 +33,9 @@ def setup_logging(log_level: str = "DEBUG") -> None:
 
     # Silence noisy third-party loggers
     for noisy in ("httpx", "httpcore", "urllib3", "neo4j", "watchfiles",
-                  "multipart", "asyncio"):
+                  "multipart", "asyncio", "sentence_transformers",
+                  "huggingface_hub", "transformers", "filelock",
+                  "torch", "tqdm"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # ── 2. Configure structlog (PrintLoggerFactory for direct stdout) ─────────

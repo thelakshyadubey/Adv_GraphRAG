@@ -165,7 +165,10 @@ async def query(req: QueryRequest) -> QueryResponse:
         elif path == "KAG_SIMPLE":
             logger.debug("kag_simple_path", query=req.query[:80])
             op = get_operator("HYBRID")
-            results = await op.run(req.query, {"doc_id": (req.doc_ids or [None])[0]})
+            results = await op.run(req.query, {
+                "doc_id": (req.doc_ids or [None])[0],
+                "doc_ids": req.doc_ids or None,
+            })
             logger.debug("kag_simple_results", hits=len(results))
             context = build_context(results, query=req.query)
             answer = await _llm_answer(context)
@@ -197,7 +200,11 @@ async def query(req: QueryRequest) -> QueryResponse:
                     depends_on=step.depends_on,
                 )
                 op = get_operator(step.operator.value)
-                ctx = {"prior_results": prior, "doc_id": (req.doc_ids or [None])[0]}
+                ctx = {
+                    "prior_results": prior,
+                    "doc_id": (req.doc_ids or [None])[0],
+                    "doc_ids": req.doc_ids or None,
+                }
                 step_res = await op.run(step.sub_query, context=ctx)
                 step_results[step.step_id] = step_res
                 all_results.extend(step_res)

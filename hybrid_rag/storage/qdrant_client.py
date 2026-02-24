@@ -209,9 +209,22 @@ class QdrantVectorClient:
         self,
         query_vec: List[float],
         filters: Optional[Dict[str, Any]] = None,
+        doc_ids: Optional[List[str]] = None,
         limit: int = 10,
     ) -> List[RetrievalResult]:
-        qdrant_filter = self._build_filter(filters) if filters else None
+        if doc_ids:
+            must: list = [qdrant_models.FieldCondition(
+                key="doc_id",
+                match=qdrant_models.MatchAny(any=doc_ids),
+            )]
+            if filters:
+                for k, v in filters.items():
+                    must.append(qdrant_models.FieldCondition(
+                        key=k, match=qdrant_models.MatchValue(value=v)
+                    ))
+            qdrant_filter = qdrant_models.Filter(must=must)
+        else:
+            qdrant_filter = self._build_filter(filters) if filters else None
         try:
             result = await self._client.query_points(
                 collection_name="chunks",
