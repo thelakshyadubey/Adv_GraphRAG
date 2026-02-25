@@ -44,16 +44,24 @@ async def route(query: str, session_ctx: Dict | None = None) -> str:
 
     # ── CAG signals ───────────────────────────────────────────────────────────
 
-    # If any of the requested doc_ids are preloaded in CAG, always use CAG.
-    # This must run FIRST — before any keyword checks — so that preloaded docs
-    # are always served from the fast context path regardless of query complexity.
+    # Route to CAG only when EVERY selected doc is preloaded in the context
+    # store. If even one doc is missing, CAG would silently answer based only
+    # on the preloaded subset — instead fall through to KAG/GLOBAL so all
+    # docs are searched properly.
     cached_docs: List[str] = ctx.get("cached_docs", [])
     if cached_docs:
         preloaded = set(cache_manager._doc_contexts.keys())
-        if any(doc in preloaded for doc in cached_docs):
+        all_covered = all(doc in preloaded for doc in cached_docs)
+        if all_covered:
             logger.info("router_decision", decision="CAG", reason="preloaded_doc_context",
                         preloaded_docs=list(preloaded & set(cached_docs)))
             return "CAG"
+        elif preloaded & set(cached_docs):
+            # Some docs are preloaded but not all — warn and fall through
+            logger.info("router_decision_partial_cache",
+                        preloaded=list(preloaded & set(cached_docs)),
+                        missing=list(set(cached_docs) - preloaded),
+                        note="falling_through_to_retrieval")
 
     if await cache_manager.has_exact(query):
         logger.info("router_decision", query_len=len(query), decision="CAG", reason="exact_cache_hit")
