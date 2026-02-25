@@ -140,20 +140,34 @@ async def query(req: QueryRequest) -> QueryResponse:
             from hybrid_rag.retrieval.rrf_merger import rrf_merge
             import asyncio as _asyncio
 
-            logger.debug("global_path_start", query=req.query[:80])
+            logger.debug("global_path_start", query=req.query[:80], doc_count=len(req.doc_ids or []))
             comm_op = CommunitySearchOperator()
             vec_op = get_operator("VECTOR_SEARCH")
-            comm_res, vec_res = await _asyncio.gather(
-                comm_op.run(req.query, {"doc_ids": req.doc_ids,
-                                        "doc_id": (req.doc_ids or [None])[0]}),
-                vec_op.run(req.query, {"doc_id": (req.doc_ids or [None])[0]}),
-                return_exceptions=True,
-            )
-            comm_list = comm_res if isinstance(comm_res, list) else []
-            vec_list  = vec_res  if isinstance(vec_res,  list) else []
+
+            # Fetch communities per-doc so every selected doc is represented.
+            # A single top-K search skews toward whichever doc has the highest
+            # semantic score, leaving other docs unrepresented.
+            per_doc_ids = req.doc_ids if req.doc_ids else [None]
+            comm_tasks = [
+                comm_op.run(req.query, {"doc_ids": [did], "doc_id": did})
+                for did in per_doc_ids
+            ]
+            # Vector search must cover ALL selected docs, not just the first
+            vec_task = vec_op.run(req.query, {
+                "doc_ids": req.doc_ids or None,
+                "doc_id": (req.doc_ids or [None])[0],
+            })
+
+            all_tasks = await _asyncio.gather(*comm_tasks, vec_task, return_exceptions=True)
+            comm_lists = [r for r in all_tasks[:-1] if isinstance(r, list)]
+            vec_list   = all_tasks[-1] if isinstance(all_tasks[-1], list) else []
+
+            # Flatten per-doc community results then merge with vector results
+            comm_list = [item for sublist in comm_lists for item in sublist]
             all_results = rrf_merge([comm_list, vec_list])
             logger.debug(
                 "global_path_results",
+                docs_queried=len(per_doc_ids),
                 community_hits=len(comm_list),
                 vector_hits=len(vec_list),
                 merged_total=len(all_results),
