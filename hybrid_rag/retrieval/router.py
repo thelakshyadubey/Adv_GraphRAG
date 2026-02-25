@@ -31,11 +31,6 @@ _GLOBAL_WORDS = [
 ]
 
 
-def _any_doc_matches(query: str, cached_docs: List[str]) -> bool:
-    q_lower = query.lower()
-    return any(doc.lower() in q_lower for doc in cached_docs)
-
-
 async def route(query: str, session_ctx: Dict | None = None) -> str:
     """
     Determine the retrieval strategy for the given query.
@@ -49,6 +44,17 @@ async def route(query: str, session_ctx: Dict | None = None) -> str:
 
     # ── CAG signals ───────────────────────────────────────────────────────────
 
+    # If any of the requested doc_ids are preloaded in CAG, always use CAG.
+    # This must run FIRST — before any keyword checks — so that preloaded docs
+    # are always served from the fast context path regardless of query complexity.
+    cached_docs: List[str] = ctx.get("cached_docs", [])
+    if cached_docs:
+        preloaded = set(cache_manager._doc_contexts.keys())
+        if any(doc in preloaded for doc in cached_docs):
+            logger.info("router_decision", decision="CAG", reason="preloaded_doc_context",
+                        preloaded_docs=list(preloaded & set(cached_docs)))
+            return "CAG"
+
     if await cache_manager.has_exact(query):
         logger.info("router_decision", query_len=len(query), decision="CAG", reason="exact_cache_hit")
         return "CAG"
@@ -57,12 +63,6 @@ async def route(query: str, session_ctx: Dict | None = None) -> str:
     words = query.split()
     if len(words) < 8 and "?" not in query:
         logger.info("router_decision", decision="CAG", reason="short_factual")
-        return "CAG"
-
-    # A previously loaded doc is relevant
-    cached_docs: List[str] = ctx.get("cached_docs", [])
-    if cached_docs and _any_doc_matches(query, cached_docs):
-        logger.info("router_decision", decision="CAG", reason="cached_doc_match")
         return "CAG"
 
     # ── GLOBAL signals (broad/thematic — use community summaries) ────────────
