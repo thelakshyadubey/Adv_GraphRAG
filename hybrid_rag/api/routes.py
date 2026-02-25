@@ -200,35 +200,49 @@ async def query(req: QueryRequest) -> QueryResponse:
             reasoning_steps: List[str] = []
             all_results: List[RetrievalResult] = []
 
-            for step in query_plan.steps:
-                # Gather results from dependency steps
-                prior: List[RetrievalResult] = []
-                for dep_id in step.depends_on:
-                    prior.extend(step_results.get(dep_id, []))
+            # Group steps into execution waves: steps with no unresolved
+            # dependencies can run in parallel; steps that depend on earlier
+            # steps wait until their dependencies are done.
+            remaining = list(query_plan.steps)
+            while remaining:
+                # Find all steps whose dependencies are already resolved
+                ready = [s for s in remaining if all(d in step_results for d in s.depends_on)]
+                if not ready:
+                    # Circular or unresolvable — fall back to sequential
+                    ready = [remaining[0]]
 
-                logger.debug(
-                    "kag_step_start",
-                    step_id=step.step_id,
-                    operator=step.operator.value,
-                    sub_query=step.sub_query[:80],
-                    depends_on=step.depends_on,
-                )
-                op = get_operator(step.operator.value)
-                ctx = {
-                    "prior_results": prior,
-                    "doc_id": (req.doc_ids or [None])[0],
-                    "doc_ids": req.doc_ids or None,
-                }
-                step_res = await op.run(step.sub_query, context=ctx)
-                step_results[step.step_id] = step_res
-                all_results.extend(step_res)
-                reasoning_steps.append(f"Step {step.step_id} [{step.operator}]: {step.sub_query}")
-                logger.debug(
-                    "kag_step_done",
-                    step_id=step.step_id,
-                    operator=step.operator.value,
-                    results=len(step_res),
-                )
+                async def _run_step(step):
+                    prior: List[RetrievalResult] = []
+                    for dep_id in step.depends_on:
+                        prior.extend(step_results.get(dep_id, []))
+                    logger.debug(
+                        "kag_step_start",
+                        step_id=step.step_id,
+                        operator=step.operator.value,
+                        sub_query=step.sub_query[:80],
+                        depends_on=step.depends_on,
+                    )
+                    op = get_operator(step.operator.value)
+                    ctx = {
+                        "prior_results": prior,
+                        "doc_id": (req.doc_ids or [None])[0],
+                        "doc_ids": req.doc_ids or None,
+                    }
+                    res = await op.run(step.sub_query, context=ctx)
+                    logger.debug(
+                        "kag_step_done",
+                        step_id=step.step_id,
+                        operator=step.operator.value,
+                        results=len(res),
+                    )
+                    return step, res
+
+                wave_results = await asyncio.gather(*[_run_step(s) for s in ready])
+                for step, step_res in wave_results:
+                    step_results[step.step_id] = step_res
+                    all_results.extend(step_res)
+                    reasoning_steps.append(f"Step {step.step_id} [{step.operator}]: {step.sub_query}")
+                    remaining.remove(step)
 
             # Final answer via LLM
             context = build_context(

@@ -24,6 +24,14 @@ class Neo4jClient:
         self._driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri,
             auth=(settings.neo4j_user, settings.neo4j_password),
+            # AuraDB drops idle TCP connections after ~30 min.
+            # Set max_connection_lifetime well below that so the driver
+            # proactively recycles connections before the server closes them,
+            # avoiding the ConnectionResetError(10054) on first request after idle.
+            max_connection_lifetime=180,      # recycle connections every 3 min
+            max_connection_pool_size=10,
+            connection_timeout=10,
+            keep_alive=True,
         )
         await self._driver.verify_connectivity()
         await self.create_indexes()
