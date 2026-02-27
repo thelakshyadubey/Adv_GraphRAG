@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     # ── Cache ──────────────────────────────────────────────────────────────────
     cache_ttl: int = 3600               # Redis L2 TTL in seconds
     l1_cache_max: int = 1000            # max entries in L1 RAM LRU cache
+    semantic_cache_threshold: float = 0.92  # cosine similarity above which queries are treated as equivalent
 
     # ── CAG ────────────────────────────────────────────────────────────────────
     cag_context_limit: int = 6000       # approx token budget for context window

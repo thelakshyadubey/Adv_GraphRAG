@@ -1,8 +1,16 @@
 """
 storage/cache_manager.py — Two-level cache: L1 in-memory LRU + L2 Redis.
 
-CAG context store: preloaded full-document text keyed by doc_id, so answering
-questions about a doc doesn't require re-fetching chunks from Qdrant.
+Exact cache  : SHA-256 hash of normalised query → answer.
+Semantic cache: embedding of query stored alongside answer. On every new query
+                the stored vectors are compared via cosine similarity. Queries
+                above settings.semantic_cache_threshold are treated as the same
+                question even if worded differently.
+
+  "what is the revenue"  ≈  "what's the revenue"  → same cache hit (sim ≈ 0.97)
+  "what is the revenue"  ≈  "tell me the costs"    → miss          (sim ≈ 0.41)
+
+CAG context store: preloaded full-document text keyed by doc_id.
 """
 from __future__ import annotations
 
@@ -10,8 +18,9 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
+import numpy as np
 import structlog
 
 from hybrid_rag.config import settings
@@ -55,6 +64,9 @@ class CacheManager:
         self._redis: Optional[Any] = None          # redis.asyncio.Redis instance
         self._doc_contexts: dict[str, str] = {}    # doc_id -> full context string
         self._access_counts: dict[str, int] = {}
+        # Semantic index: list of (unit_vector, query_hash) kept in insertion order.
+        # Used to find near-duplicate queries without exact string match.
+        self._sem_index: List[Tuple[np.ndarray, str]] = []
 
     async def connect(self) -> None:
         """Optionally connect to Redis. Gracefully degrades to L1-only if unavailable."""
@@ -83,43 +95,134 @@ class CacheManager:
     def _doc_key(doc_id: str, query_hash: str) -> str:
         return f"cag:{doc_id}:{query_hash}"
 
-    # ── Exact match cache ─────────────────────────────────────────────────────
+    # ── Semantic helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _embed(text: str) -> np.ndarray:
+        """Embed a single string and return a unit vector."""
+        from hybrid_rag.ingestion.embedder import embed as _embed_fn
+        vec = np.array(_embed_fn(text), dtype=np.float32)
+        norm = np.linalg.norm(vec)
+        return vec / (norm + 1e-9)
+
+    def _sem_find(self, q_vec: np.ndarray) -> Optional[str]:
+        """
+        Walk the in-memory semantic index and return the cached query hash
+        whose stored vector is most similar to q_vec, if similarity >=
+        settings.semantic_cache_threshold.  Returns None on miss.
+        """
+        if not self._sem_index:
+            return None
+        threshold = settings.semantic_cache_threshold
+        best_score = -1.0
+        best_hash: Optional[str] = None
+        for stored_vec, stored_hash in self._sem_index:
+            sim = float(np.dot(q_vec, stored_vec))
+            if sim > best_score:
+                best_score = sim
+                best_hash = stored_hash
+        if best_score >= threshold:
+            logger.info("semantic_cache_hit", similarity=round(best_score, 4))
+            return best_hash
+        return None
+
+    def _sem_add(self, query: str, query_hash: str) -> None:
+        """Embed the query and add it to the in-memory semantic index."""
+        try:
+            vec = self._embed(query)
+            self._sem_index.append((vec, query_hash))
+            # Cap the index at _L1_MAX entries (drop oldest)
+            if len(self._sem_index) > _L1_MAX:
+                self._sem_index.pop(0)
+        except Exception as exc:
+            logger.warning("sem_index_add_failed", error=str(exc))
+
+    # ── Cache lookup (exact + semantic) ──────────────────────────────────────
 
     async def has_exact(self, query: str) -> bool:
+        """
+        Returns True if either:
+          • the exact normalised query has been seen before, OR
+          • a semantically equivalent query (cosine sim >= threshold) is cached.
+        """
         h = self._hash(query)
+
+        # 1. Exact match — L1
         if self._l1.get(h) is not None:
             return True
+
+        # 2. Exact match — L2 Redis
         if self._redis:
             try:
-                return await self._redis.exists(h) == 1
+                if await self._redis.exists(h) == 1:
+                    return True
             except Exception:
                 pass
+
+        # 3. Semantic match — in-memory index
+        try:
+            q_vec = self._embed(query)
+            if self._sem_find(q_vec) is not None:
+                return True
+        except Exception:
+            pass
+
         return False
 
     async def get(self, query: str) -> Optional[str]:
+        """
+        Return cached answer for query.  Checks exact hash first,
+        then falls back to semantic similarity lookup.
+        """
         h = self._hash(query)
-        # L1 first
+
+        # 1. Exact — L1
         val = self._l1.get(h)
         if val is not None:
             return val
-        # L2
+
+        # 2. Exact — L2 Redis
         if self._redis:
             try:
                 val = await self._redis.get(h)
                 if val:
-                    self._l1.set(h, val)
+                    self._l1.set(h, val)        # promote to L1
                     return val
             except Exception:
                 pass
+
+        # 3. Semantic — in-memory index → resolve hash → fetch answer
+        try:
+            q_vec = self._embed(query)
+            matched_hash = self._sem_find(q_vec)
+            if matched_hash:
+                # Fetch the answer stored under the matched hash
+                val = self._l1.get(matched_hash)
+                if val is not None:
+                    return val
+                if self._redis:
+                    try:
+                        val = await self._redis.get(matched_hash)
+                        if val:
+                            self._l1.set(h, val)    # cache under new hash too
+                            return val
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.warning("semantic_get_failed", error=str(exc))
+
         return None
 
     async def set(self, query: str, answer: str, doc_id: Optional[str] = None) -> None:
         h = self._hash(query)
         self._l1.set(h, answer)
+
+        # Add to semantic index so future paraphrases hit this answer
+        self._sem_add(query, h)
+
         if self._redis:
             try:
                 await self._redis.setex(h, _L2_TTL, answer)
-                # Also store under doc-scoped key for easy invalidation
                 if doc_id:
                     await self._redis.setex(self._doc_key(doc_id, h), _L2_TTL, answer)
             except Exception as exc:
