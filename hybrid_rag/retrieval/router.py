@@ -139,10 +139,6 @@ async def route(query: str, session_ctx: Dict | None = None) -> str:
                         missing=list(set(cached_docs) - preloaded),
                         note="falling_through_to_retrieval")
 
-    if await cache_manager.has_exact(query):
-        logger.info("router_decision", decision="CAG", reason="exact_cache_hit")
-        return "CAG"
-
     # ── LLM agent routing for GLOBAL / KAG / KAG_SIMPLE ─────────────────────
     # Run in a thread executor so the blocking Groq HTTP call doesn't stall
     # the async event loop.

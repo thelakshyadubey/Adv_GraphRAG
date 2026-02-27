@@ -110,6 +110,7 @@ async def query(req: QueryRequest) -> QueryResponse:
     from hybrid_rag.retrieval.kag_planner import plan
     from hybrid_rag.retrieval.operators import get_operator
     from hybrid_rag.retrieval.context_builder import build as build_context
+    from hybrid_rag.storage.cache_manager import cache_manager
     from hybrid_rag.storage.schema import RetrievalResult
 
     start_ms = time.time() * 1000
@@ -124,6 +125,18 @@ async def query(req: QueryRequest) -> QueryResponse:
     )
 
     try:
+        # ── Cache check — before routing or any LLM call ──────────────────────
+        cached_answer = await cache_manager.get(req.query)
+        if cached_answer:
+            latency = time.time() * 1000 - start_ms
+            logger.info("cache_hit", latency_ms=round(latency, 1))
+            return QueryResponse(
+                answer=cached_answer,
+                sources=[],
+                path_used="CACHE",
+                latency_ms=round(latency, 2),
+            )
+
         path = await query_router.route(req.query, session_ctx)
         logger.info("query_routed", path=path, query=req.query[:80])
         answer = ""
@@ -261,6 +274,12 @@ async def query(req: QueryRequest) -> QueryResponse:
             sources=len(sources),
             answer_chars=len(answer),
         )
+
+        # ── Write answer to cache for all paths ───────────────────────────────
+        if answer:
+            primary_doc = (req.doc_ids or [None])[0]
+            await cache_manager.set(req.query, answer, doc_id=primary_doc)
+
         return QueryResponse(
             answer=answer,
             sources=sources,
