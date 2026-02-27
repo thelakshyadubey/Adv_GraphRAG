@@ -58,6 +58,9 @@ class LRUCache:
         return list(self._cache.keys())
 
 
+_REDIS_RETRY_INTERVAL = 60  # seconds between reconnect attempts
+
+
 class CacheManager:
     def __init__(self) -> None:
         self._l1 = LRUCache(maxsize=_L1_MAX)
@@ -67,19 +70,32 @@ class CacheManager:
         # Semantic index: list of (unit_vector, query_hash) kept in insertion order.
         # Used to find near-duplicate queries without exact string match.
         self._sem_index: List[Tuple[np.ndarray, str]] = []
+        self._last_redis_attempt: float = 0.0      # epoch timestamp of last connect attempt
 
-    async def connect(self) -> None:
-        """Optionally connect to Redis. Gracefully degrades to L1-only if unavailable."""
+    async def _try_connect_redis(self) -> None:
+        """Attempt to connect to Redis. Called at startup and lazily retried every
+        _REDIS_RETRY_INTERVAL seconds so the app self-heals without a restart."""
+        now = time.monotonic()
+        if now - self._last_redis_attempt < _REDIS_RETRY_INTERVAL:
+            return  # too soon to retry
+        self._last_redis_attempt = now
         try:
             import redis.asyncio as aioredis  # type: ignore
-            self._redis = await aioredis.from_url(
-                settings.redis_url, decode_responses=True, socket_connect_timeout=2
+            client = await aioredis.from_url(
+                settings.redis_url, decode_responses=True, socket_connect_timeout=3
             )
-            await self._redis.ping()
+            await client.ping()
+            self._redis = client
             logger.info("redis_connected", url=settings.redis_url)
         except Exception as exc:
-            logger.warning("redis_unavailable_l1_only", error=str(exc))
+            if self._redis is None:
+                # Only log on first failure or after recovering → avoids log spam
+                logger.warning("redis_unavailable_l1_only", error=str(exc))
             self._redis = None
+
+    async def connect(self) -> None:
+        """Called at app startup. Failures are non-fatal — L1 cache still works."""
+        await self._try_connect_redis()
 
     async def close(self) -> None:
         if self._redis:
@@ -145,6 +161,9 @@ class CacheManager:
           • the exact normalised query has been seen before, OR
           • a semantically equivalent query (cosine sim >= threshold) is cached.
         """
+        if self._redis is None:
+            await self._try_connect_redis()
+
         h = self._hash(query)
 
         # 1. Exact match — L1
@@ -157,7 +176,7 @@ class CacheManager:
                 if await self._redis.exists(h) == 1:
                     return True
             except Exception:
-                pass
+                self._redis = None  # will reconnect on next call
 
         # 3. Semantic match — in-memory index
         try:
@@ -174,6 +193,9 @@ class CacheManager:
         Return cached answer for query.  Checks exact hash first,
         then falls back to semantic similarity lookup.
         """
+        if self._redis is None:
+            await self._try_connect_redis()
+
         h = self._hash(query)
 
         # 1. Exact — L1
@@ -189,7 +211,7 @@ class CacheManager:
                     self._l1.set(h, val)        # promote to L1
                     return val
             except Exception:
-                pass
+                self._redis = None  # will reconnect on next call
 
         # 3. Semantic — in-memory index → resolve hash → fetch answer
         try:
@@ -214,6 +236,9 @@ class CacheManager:
         return None
 
     async def set(self, query: str, answer: str, doc_id: Optional[str] = None) -> None:
+        if self._redis is None:
+            await self._try_connect_redis()
+
         h = self._hash(query)
         self._l1.set(h, answer)
 
@@ -227,6 +252,7 @@ class CacheManager:
                     await self._redis.setex(self._doc_key(doc_id, h), _L2_TTL, answer)
             except Exception as exc:
                 logger.warning("redis_set_failed", error=str(exc))
+                self._redis = None  # will reconnect on next call
 
     # ── CAG document context ──────────────────────────────────────────────────
 
