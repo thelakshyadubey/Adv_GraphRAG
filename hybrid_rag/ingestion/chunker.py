@@ -62,7 +62,7 @@ def semantic_chunk(
         import numpy as np  # type: ignore
 
         model = SentenceTransformer(settings.groq_embed_model)
-        embeddings = model.encode(sents, batch_size=32, show_progress_bar=False)
+        embeddings = model.encode(sents, batch_size=settings.embed_batch_size, show_progress_bar=False)
 
         chunks: List[str] = []
         current: List[str] = [sents[0]]

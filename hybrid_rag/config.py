@@ -7,7 +7,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Known embedding model → expected output dimension.
+# Used by the startup validator to catch mismatched config before anything
+# is stored in Qdrant (a mismatch would cause silent upsert failures).
+_MODEL_DIMS: dict[str, int] = {
+    "all-MiniLM-L6-v2": 384,
+    "all-mpnet-base-v2": 768,
+    "nomic-ai/nomic-embed-text-v1.5": 768,
+    "BAAI/bge-small-en-v1.5": 384,
+    "BAAI/bge-large-en-v1.5": 1024,
+}
 
 # Resolve .env relative to this file so it works regardless of CWD
 _ENV_FILE = Path(__file__).parent / ".env"
@@ -51,13 +63,43 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 64
     semantic_threshold: float = 0.75
+    embed_batch_size: int = 32          # batch size for SentenceTransformer.encode()
 
     # ── Retrieval ──────────────────────────────────────────────────────────────
     rrf_k: int = 60
+    community_search_limit: int = 3     # top-N community summaries per doc in GLOBAL path
+
+    # ── Qdrant collection names ────────────────────────────────────────────────
+    qdrant_chunks_collection: str = "chunks"
+    qdrant_summaries_collection: str = "summaries"
+    qdrant_entities_collection: str = "entities"
+
+    # ── Neo4j index / label names ─────────────────────────────────────────────
+    neo4j_entity_label: str = "Entity"
+    neo4j_fulltext_index: str = "entity_name_ft"
+    neo4j_node_id_index: str = "entity_node_id"
+
+    # ── Cache ──────────────────────────────────────────────────────────────────
+    cache_ttl: int = 3600               # Redis L2 TTL in seconds
+    l1_cache_max: int = 1000            # max entries in L1 RAM LRU cache
 
     # ── CAG ────────────────────────────────────────────────────────────────────
-    cag_context_limit: int = 6000        # approx token budget for context window
+    cag_context_limit: int = 6000       # approx token budget for context window
     cag_min_access_count: int = 5
+
+    # ── Startup validator ─────────────────────────────────────────────────────
+    @model_validator(mode="after")
+    def _check_embedding_dim(self) -> "Settings":
+        """Catch model/dim mismatch before anything is written to Qdrant."""
+        expected = _MODEL_DIMS.get(self.groq_embed_model)
+        if expected is not None and self.embedding_dim != expected:
+            raise ValueError(
+                f"embedding_dim={self.embedding_dim} does not match "
+                f"groq_embed_model='{self.groq_embed_model}' "
+                f"(expected {expected}). "
+                f"Update EMBEDDING_DIM in your .env to {expected}."
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

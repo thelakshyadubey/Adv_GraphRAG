@@ -47,7 +47,7 @@ def embed(text: str) -> List[float]:
     return vec.tolist()
 
 
-def batch_embed(texts: List[str], batch_size: int = 32) -> List[List[float]]:
+def batch_embed(texts: List[str], batch_size: int | None = None) -> List[List[float]]:
     """
     Embed a list of strings in batches.
 
@@ -57,6 +57,8 @@ def batch_embed(texts: List[str], batch_size: int = 32) -> List[List[float]]:
     """
     if not texts:
         return []
+    if batch_size is None:
+        batch_size = settings.embed_batch_size
     try:
         model = _get_model()
         embeddings = model.encode(

@@ -90,7 +90,7 @@ class GraphExactOperator(BaseOperator):
                         must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids)))
                     flt = qm.Filter(must=must)
                     records, _ = await qdrant_client._client.scroll(
-                        collection_name="chunks",
+                        collection_name=settings.qdrant_chunks_collection,
                         scroll_filter=flt,
                         limit=1,
                         with_payload=True,
@@ -190,7 +190,7 @@ class HybridOperator(BaseOperator):
                     must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids_ctx)))
                 flt = qm.Filter(must=must)
                 records, _ = await qdrant_client._client.scroll(
-                    collection_name="chunks", scroll_filter=flt,
+                    collection_name=settings.qdrant_chunks_collection, scroll_filter=flt,
                     limit=1, with_payload=True, with_vectors=False,
                 )
                 for rec in records:
@@ -249,7 +249,7 @@ class MultiHopOperator(BaseOperator):
                     must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids)))
                 flt = qm.Filter(must=must)
                 records, _ = await qdrant_client._client.scroll(
-                    collection_name="chunks", scroll_filter=flt,
+                    collection_name=settings.qdrant_chunks_collection, scroll_filter=flt,
                     limit=1, with_payload=True, with_vectors=False,
                 )
                 for rec in records:
@@ -279,7 +279,7 @@ class SummaryOperator(BaseOperator):
 
         try:
             q_vec = embedder.embed(sub_query)
-            results = await qdrant_client.search_summaries(q_vec, limit=3)
+            results = await qdrant_client.search_summaries(q_vec, limit=settings.community_search_limit)
             logger.info("summary_results", count=len(results))
             return results
         except Exception as exc:
@@ -312,7 +312,7 @@ class CommunitySearchOperator(BaseOperator):
         )
         try:
             q_vec = embedder.embed(sub_query)
-            results = await qdrant_client.search_communities(q_vec, doc_ids=doc_ids, limit=5)
+            results = await qdrant_client.search_communities(q_vec, doc_ids=doc_ids, limit=settings.community_search_limit)
             logger.info("community_search_results", count=len(results))
             return results
         except Exception as exc:

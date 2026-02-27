@@ -44,29 +44,32 @@ class Neo4jClient:
     # ── Index setup ───────────────────────────────────────────────────────────
 
     async def create_indexes(self) -> None:
+        label = settings.neo4j_entity_label
+        ft_idx = settings.neo4j_fulltext_index
+        nid_idx = settings.neo4j_node_id_index
         async with self._driver.session() as session:
             # Standard property index
             try:
                 await session.run(
-                    "CREATE INDEX entity_node_id IF NOT EXISTS FOR (e:Entity) ON (e.node_id)"
+                    f"CREATE INDEX {nid_idx} IF NOT EXISTS FOR (e:{label}) ON (e.node_id)"
                 )
             except Exception as exc:
-                logger.warning("index_creation_skipped", index="entity_node_id", error=str(exc))
+                logger.warning("index_creation_skipped", index=nid_idx, error=str(exc))
 
             # Fulltext index — drop and recreate if it somehow ended up in a bad state
             try:
                 await session.run(
-                    "CREATE FULLTEXT INDEX entity_name_ft IF NOT EXISTS FOR (e:Entity) ON EACH [e.name]"
+                    f"CREATE FULLTEXT INDEX {ft_idx} IF NOT EXISTS FOR (e:{label}) ON EACH [e.name]"
                 )
-                logger.info("fulltext_index_ensured", index="entity_name_ft")
+                logger.info("fulltext_index_ensured", index=ft_idx)
             except Exception as exc:
                 # Some Neo4j versions reject IF NOT EXISTS for fulltext — try without it
                 logger.warning("fulltext_index_create_failed", error=str(exc))
                 try:
                     await session.run(
-                        "CREATE FULLTEXT INDEX entity_name_ft FOR (e:Entity) ON EACH [e.name]"
+                        f"CREATE FULLTEXT INDEX {ft_idx} FOR (e:{label}) ON EACH [e.name]"
                     )
-                    logger.info("fulltext_index_created_fallback", index="entity_name_ft")
+                    logger.info("fulltext_index_created_fallback", index=ft_idx)
                 except Exception as exc2:
                     logger.warning("fulltext_index_already_exists_or_failed", error=str(exc2))
 
@@ -79,8 +82,9 @@ class Neo4jClient:
     # ── CRUD ──────────────────────────────────────────────────────────────────
 
     async def create_entity(self, entity: Entity) -> None:
-        query = """
-        MERGE (e:Entity {node_id: $node_id})
+        label = settings.neo4j_entity_label
+        query = f"""
+        MERGE (e:{label} {{node_id: $node_id}})
         SET   e.entity_type = $entity_type,
               e.name        = $name,
               e.properties  = $properties,
@@ -105,10 +109,11 @@ class Neo4jClient:
             await self.create_entity(entity)
 
     async def create_relation(self, rel: Relation) -> None:
-        query = """
-        MATCH (src:Entity {node_id: $source_id})
-        MATCH (tgt:Entity {node_id: $target_id})
-        MERGE (src)-[r:RELATES_TO {rel_id: $rel_id, rel_type: $rel_type}]->(tgt)
+        label = settings.neo4j_entity_label
+        query = f"""
+        MATCH (src:{label} {{node_id: $source_id}})
+        MATCH (tgt:{label} {{node_id: $target_id}})
+        MERGE (src)-[r:RELATES_TO {{rel_id: $rel_id, rel_type: $rel_type}}]->(tgt)
         SET   r.properties = $properties
         """
         try:
@@ -130,8 +135,9 @@ class Neo4jClient:
             await self.create_relation(rel)
 
     async def add_chunk_to_node(self, node_id: str, chunk_id: str) -> None:
-        query = """
-        MATCH (e:Entity {node_id: $node_id})
+        label = settings.neo4j_entity_label
+        query = f"""
+        MATCH (e:{label} {{node_id: $node_id}})
         SET   e.chunk_ids = CASE
                 WHEN $chunk_id IN coalesce(e.chunk_ids, []) THEN e.chunk_ids
                 ELSE coalesce(e.chunk_ids, []) + [$chunk_id]
@@ -145,7 +151,8 @@ class Neo4jClient:
             raise
 
     async def get_entity(self, node_id: str) -> Optional[Entity]:
-        query = "MATCH (e:Entity {node_id: $node_id}) RETURN e"
+        label = settings.neo4j_entity_label
+        query = f"MATCH (e:{label} {{node_id: $node_id}}) RETURN e"
         try:
             async with self._driver.session() as session:
                 result = await session.run(query, node_id=node_id)
@@ -167,9 +174,11 @@ class Neo4jClient:
     # ── Search ────────────────────────────────────────────────────────────────
 
     async def search_by_name(self, name: str, fuzzy: bool = True) -> List[Entity]:
+        ft_idx = settings.neo4j_fulltext_index
+        label = settings.neo4j_entity_label
         if fuzzy:
-            query = """
-            CALL db.index.fulltext.queryNodes('entity_name_ft', $name)
+            query = f"""
+            CALL db.index.fulltext.queryNodes('{ft_idx}', $name)
             YIELD node, score
             RETURN node
             ORDER BY score DESC
@@ -177,8 +186,8 @@ class Neo4jClient:
             """
         else:
             # Substring match — used as fallback when fulltext index unavailable
-            query = """
-            MATCH (e:Entity)
+            query = f"""
+            MATCH (e:{label})
             WHERE toLower(e.name) CONTAINS toLower($name)
             RETURN e AS node
             LIMIT 10
@@ -200,10 +209,10 @@ class Neo4jClient:
         except Exception as exc:
             err_str = str(exc)
             # Fulltext index missing — fall back to case-insensitive CONTAINS search
-            if fuzzy and "entity_name_ft" in err_str:
+            if fuzzy and settings.neo4j_fulltext_index in err_str:
                 logger.warning(
                     "fulltext_index_missing_fallback",
-                    detail="entity_name_ft not found, using CONTAINS match",
+                    detail=f"{settings.neo4j_fulltext_index} not found, using CONTAINS match",
                 )
                 return await self.search_by_name(name, fuzzy=False)
             logger.error("search_by_name_failed", name=name, error=err_str)
@@ -212,8 +221,9 @@ class Neo4jClient:
     # ── Traversal ─────────────────────────────────────────────────────────────
 
     async def traverse(self, node_id: str, depth: int = 2) -> Dict[str, Any]:
-        query = """
-        MATCH path = (start:Entity {node_id: $node_id})-[*1..$depth]-(related)
+        label = settings.neo4j_entity_label
+        query = f"""
+        MATCH path = (start:{label} {{node_id: $node_id}})-[*1..$depth]-(related)
         RETURN path LIMIT 50
         """
         try:
@@ -226,8 +236,9 @@ class Neo4jClient:
             return {}
 
     async def multi_hop(self, start_id: str, depth: int = 3) -> List[Dict[str, Any]]:
-        query = """
-        MATCH path = (start:Entity {node_id: $start_id})-[*1..$depth]->(end:Entity)
+        label = settings.neo4j_entity_label
+        query = f"""
+        MATCH path = (start:{label} {{node_id: $start_id}})-[*1..$depth]->(end:{label})
         RETURN DISTINCT end.node_id AS node_id,
                         end.name    AS name,
                         end.entity_type AS entity_type,

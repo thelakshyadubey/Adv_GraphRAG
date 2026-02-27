@@ -2,6 +2,45 @@
 
 A unified document intelligence system that combines three retrieval paradigms — **Cache-Augmented Generation (CAG)**, **Knowledge-Augmented Generation (KAG)**, and **GraphRAG community search** — under a single smart router.
 
+Upload any document (PDF, DOCX, TXT, CSV). Ask questions in natural language. The system automatically picks the fastest and most accurate retrieval path based on your question type.
+
+---
+
+## System Flow
+
+```mermaid
+flowchart TD
+    A([You upload a file]) --> B[Server saves temp file]
+    B --> C[Parse → plain text]
+    C --> D[Chunk → topic-based pieces]
+    D --> E[Embed → 384-number vectors]
+    D --> F[Extract → entities + relations via LLM]
+    E --> G[(Qdrant\nvectors)]
+    F --> H[(Neo4j\ngraph)]
+    F --> I[Community Detection\ncluster related entities]
+    I --> J[LLM summarizes each cluster]
+    J --> G
+    D --> K[Doc + section summaries via LLM]
+    K --> G
+    A2([You ask a question]) --> R{Smart Router}
+    R -->|cached before| CAG[CAG\nreturn from memory]
+    R -->|simple question| KS[KAG Simple\nvector + entity search]
+    R -->|complex question| KAG[KAG\nplanned multi-step search]
+    R -->|themes / overview| GL[Global\ncommunity summaries]
+    CAG --> MEM[(Cache\nRAM + Redis)]
+    KS --> G
+    KS --> H
+    KAG --> G
+    KAG --> H
+    GL --> G
+    CAG --> LLM[Groq LLM]
+    KS --> LLM
+    KAG --> LLM
+    GL --> LLM
+    LLM --> ANS([Answer + Source + Path])
+    ANS --> MEM
+```
+
 ---
 
 ## What It Does
@@ -82,7 +121,7 @@ Question → Smart Router → Pick Path → Retrieve → Context Builder → Gro
 Never touches Qdrant or Neo4j.
 - **Exact cache hit** → return answer in 0.001ms
 - **Preloaded doc** → full doc text in RAM → one LLM call → answer in ~1500ms
-- Every answer is automatically cached in L1 (RAM) + L2 (Redis, TTL 1hr)
+- Every answer is automatically saved in L1 (RAM) + L2 (Redis, TTL 1hr)
 
 ### KAG_SIMPLE — Single Hybrid Search
 One round of retrieval using two methods in parallel:
@@ -93,7 +132,7 @@ One round of retrieval using two methods in parallel:
 ### KAG — Multi-Step Knowledge-Augmented Generation
 LLM generates a retrieval plan first, then executes it:
 - Breaks complex query into sub-queries with operator assignments
-- Independent steps run in parallel (asyncio.gather)
+- Independent steps run in parallel (`asyncio.gather`)
 - Dependent steps wait for their dependencies
 - Six operators available: VECTOR_SEARCH, ENTITY_SEARCH, HYBRID, GRAPH_EXACT, MULTI_HOP, COMMUNITY_SEARCH
 - All step results merged via RRF → LLM → answer
@@ -154,9 +193,9 @@ Chunks found by **multiple retrieval methods** rank higher — they are more tru
 | **Qdrant** | Vector database | MatchAny filter, async client, free cloud tier |
 | **Neo4j AuraDB** | Graph database | Native graph traversal, Cypher, fulltext index |
 | **Redis** | L2 answer cache | Sub-ms lookup, TTL per key, survives restarts |
-| **Groq (Llama 3.1 8B)** | LLM inference | 800 tok/s (vs OpenAI ~50), free tier, 128K context |
+| **Groq (Llama 3.1 8B)** | LLM inference | 800 tok/s vs OpenAI ~50, free tier, 128K context |
 | **all-MiniLM-L6-v2** | Embedding model | 22M params, 384-dim, runs on CPU, Apache 2.0 |
-| **PyMuPDF** | PDF parsing | C bindings, 50x faster than pdfplumber |
+| **PyMuPDF** | PDF parsing | C bindings, 50× faster than pdfplumber |
 | **Union-Find** | Community clustering | O(α(n)) ≈ O(1), no GPU, works on edge list |
 | **RRF** | Result merging | Parameter-free, rewards multi-method agreement |
 | **structlog** | Logging | Structured JSON, silenceable per library |
@@ -169,7 +208,7 @@ Chunks found by **multiple retrieval methods** rank higher — they are more tru
 hybrid_rag/
 ├── api/
 │   ├── main.py              ← entry point, starts server
-│   └── routes.py            ← all HTTP endpoints
+│   └── routes.py            ← all HTTP endpoints + retrieval orchestration
 ├── ingestion/
 │   ├── pipeline.py          ← orchestrates full ingestion
 │   ├── parser.py            ← file → plain text
@@ -189,7 +228,7 @@ hybrid_rag/
 ├── storage/
 │   ├── schema.py            ← all Pydantic data models
 │   ├── qdrant_client.py     ← vector DB operations
-│   ├── neo4j_client.py      ← graph DB operations
+│   └── neo4j_client.py      ← graph DB operations (max_connection_lifetime=180)
 │   └── cache_manager.py     ← L1 RAM + L2 Redis cache
 ├── config.py                ← all settings from .env
 ├── logging_config.py        ← structured log setup
@@ -248,14 +287,17 @@ Start-Process "C:\path\to\redis-server.exe" -WindowStyle Minimized
 
 ### Run
 
-```bash
-python -m hybrid_rag.api.main
+```powershell
+.venv\Scripts\python.exe -m hybrid_rag.api.main
 ```
 
 Server starts at `http://localhost:8000`
-- UI: `http://localhost:8000/ui/index.html`
-- API docs: `http://localhost:8000/docs`
-- Health: `http://localhost:8000/health`
+
+| URL | Purpose |
+|---|---|
+| `http://localhost:8000/ui/index.html` | Full browser UI |
+| `http://localhost:8000/docs` | Interactive API docs (Swagger) |
+| `http://localhost:8000/health` | Check all service connections |
 
 ---
 
@@ -309,7 +351,10 @@ L1 RAM → L2 Redis → Qdrant → Neo4j. A repeated question never hits a datab
 ```
 
 **4. Fail fast at startup, graceful fallback at runtime**
-Missing indexes, broken connections — detected at server startup. Individual chunk extraction failures — logged and skipped, ingestion continues.
+Missing indexes and broken connections are detected at server startup. Individual chunk extraction failures are logged and skipped — ingestion continues.
+
+**5. Every answer is a cache entry**
+After any path (KAG, GLOBAL, CAG), the answer is stored. The next identical question hits L1 in microseconds.
 
 ---
 

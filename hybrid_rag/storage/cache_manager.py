@@ -18,8 +18,8 @@ from hybrid_rag.config import settings
 
 logger = structlog.get_logger(__name__)
 
-_L1_MAX = 1000          # Max entries in L1 LRU cache
-_L2_TTL = 3600          # Redis TTL in seconds
+_L1_MAX = settings.l1_cache_max   # Max entries in L1 LRU cache
+_L2_TTL = settings.cache_ttl      # Redis TTL in seconds
 
 
 class LRUCache:

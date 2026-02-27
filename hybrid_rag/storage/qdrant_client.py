@@ -14,7 +14,14 @@ from hybrid_rag.storage.schema import Chunk, Entity, RetrievalResult, Summary
 
 logger = structlog.get_logger(__name__)
 
-COLLECTIONS = ["chunks", "entities", "summaries"]
+# Collection names are configured in settings so they can be changed per
+# deployment without touching code (e.g. staging vs production namespacing).
+def _collections() -> list[str]:
+    return [
+        settings.qdrant_chunks_collection,
+        settings.qdrant_entities_collection,
+        settings.qdrant_summaries_collection,
+    ]
 
 
 class QdrantVectorClient:
@@ -54,7 +61,7 @@ class QdrantVectorClient:
 
     async def _ensure_collections(self) -> None:
         existing = {c.name for c in (await self._client.get_collections()).collections}
-        for name in COLLECTIONS:
+        for name in _collections():
             if name not in existing:
                 await self._client.create_collection(
                     collection_name=name,
@@ -70,12 +77,12 @@ class QdrantVectorClient:
     async def _ensure_payload_indexes(self) -> None:
         """Create keyword payload indexes needed for filtered queries."""
         _indexes = {
-            "chunks":    [("doc_id", qdrant_models.PayloadSchemaType.KEYWORD),
-                          ("chunk_id", qdrant_models.PayloadSchemaType.KEYWORD)],
-            "entities":  [("node_id", qdrant_models.PayloadSchemaType.KEYWORD),
-                          ("entity_type", qdrant_models.PayloadSchemaType.KEYWORD)],
-            "summaries": [("parent_id", qdrant_models.PayloadSchemaType.KEYWORD),
-                          ("summary_type", qdrant_models.PayloadSchemaType.KEYWORD)],
+            settings.qdrant_chunks_collection:    [("doc_id", qdrant_models.PayloadSchemaType.KEYWORD),
+                                                   ("chunk_id", qdrant_models.PayloadSchemaType.KEYWORD)],
+            settings.qdrant_entities_collection:  [("node_id", qdrant_models.PayloadSchemaType.KEYWORD),
+                                                   ("entity_type", qdrant_models.PayloadSchemaType.KEYWORD)],
+            settings.qdrant_summaries_collection: [("parent_id", qdrant_models.PayloadSchemaType.KEYWORD),
+                                                   ("summary_type", qdrant_models.PayloadSchemaType.KEYWORD)],
         }
         for collection, fields in _indexes.items():
             for field, schema in fields:
@@ -108,7 +115,7 @@ class QdrantVectorClient:
                 "position": chunk.position,
             },
         )
-        await self._client.upsert(collection_name="chunks", points=[point])
+        await self._client.upsert(collection_name=settings.qdrant_chunks_collection, points=[point])
 
     async def upsert_entity(self, entity: Entity) -> None:
         if entity.embedding is None:
@@ -123,7 +130,7 @@ class QdrantVectorClient:
                 "chunk_ids": entity.chunk_ids,
             },
         )
-        await self._client.upsert(collection_name="entities", points=[point])
+        await self._client.upsert(collection_name=settings.qdrant_entities_collection, points=[point])
 
     async def upsert_summary(self, summary: Summary) -> None:
         if summary.embedding is None:
@@ -143,7 +150,7 @@ class QdrantVectorClient:
             vector=summary.embedding,
             payload=payload,
         )
-        await self._client.upsert(collection_name="summaries", points=[point])
+        await self._client.upsert(collection_name=settings.qdrant_summaries_collection, points=[point])
 
     async def batch_upsert(self, collection: str, items: List[Any]) -> None:
         """Batch upsert for Chunk, Entity, or Summary objects."""
@@ -227,7 +234,7 @@ class QdrantVectorClient:
             qdrant_filter = self._build_filter(filters) if filters else None
         try:
             result = await self._client.query_points(
-                collection_name="chunks",
+                collection_name=settings.qdrant_chunks_collection,
                 query=query_vec,
                 query_filter=qdrant_filter,
                 limit=limit,
@@ -261,7 +268,7 @@ class QdrantVectorClient:
         qdrant_filter = qdrant_models.Filter(must=must_conditions)
         try:
             result = await self._client.query_points(
-                collection_name="summaries",
+                collection_name=settings.qdrant_summaries_collection,
                 query=query_vec,
                 query_filter=qdrant_filter,
                 limit=limit,
@@ -293,7 +300,7 @@ class QdrantVectorClient:
         qdrant_filter = self._build_filter(filters) if filters else None
         try:
             result = await self._client.query_points(
-                collection_name="summaries",
+                collection_name=settings.qdrant_summaries_collection,
                 query=query_vec,
                 query_filter=qdrant_filter,
                 limit=limit,
@@ -314,7 +321,7 @@ class QdrantVectorClient:
                 )]
             )
             records, _ = await self._client.scroll(
-                collection_name="chunks",
+                collection_name=settings.qdrant_chunks_collection,
                 scroll_filter=qdrant_filter,
                 limit=5000,
                 with_payload=True,

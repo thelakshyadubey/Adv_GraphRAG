@@ -10,6 +10,7 @@ from typing import List
 
 import structlog
 
+from hybrid_rag.config import settings
 from hybrid_rag.storage.schema import Chunk, Entity
 
 logger = structlog.get_logger(__name__)
@@ -67,7 +68,7 @@ async def expand(chunk_ids: List[str]) -> List[str]:
             from qdrant_client.http import models as qm  # type: ignore
             flt = qm.Filter(must=[qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))])
             records, _ = await qdrant_client._client.scroll(
-                collection_name="chunks",
+                collection_name=settings.qdrant_chunks_collection,
                 scroll_filter=flt,
                 limit=1,
                 with_payload=True,
