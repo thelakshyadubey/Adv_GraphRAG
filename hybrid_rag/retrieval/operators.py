@@ -28,6 +28,12 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE = 2.0
 
 
+async def _embed_async(text: str) -> list:
+    """Run the synchronous embedder in a thread pool so the event loop is never blocked."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, embedder.embed, text)
+
+
 def _groq_client():
     from groq import Groq  # type: ignore
     return Groq(api_key=settings.groq_api_key)
@@ -123,18 +129,19 @@ class VectorSearchOperator(BaseOperator):
         self,
         sub_query: str,
         context: Dict[str, Any] = None,
-        limit: int = 10,
+        limit: int = None,
     ) -> List[RetrievalResult]:
         from hybrid_rag.storage.qdrant_client import qdrant_client
 
         ctx = context or {}
+        effective_limit = limit if limit is not None else settings.retrieval_top_k
         try:
-            q_vec = embedder.embed(sub_query)
+            q_vec = await _embed_async(sub_query)
             doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
                 [ctx["doc_id"]] if ctx.get("doc_id") else None
             )
             results = await qdrant_client.search_chunks(
-                q_vec, doc_ids=doc_ids, limit=limit
+                q_vec, doc_ids=doc_ids, limit=effective_limit
             )
             logger.info("vector_search_results", count=len(results))
             return results
@@ -231,7 +238,7 @@ class MultiHopOperator(BaseOperator):
                 all_hops.extend(hops)
 
             # Collect chunk texts reachable via hops
-            q_vec = embedder.embed(sub_query)
+            q_vec = await _embed_async(sub_query)
             results: List[RetrievalResult] = []
             hop_chunk_ids: set[str] = set()
             for hop in all_hops[:20]:
@@ -278,7 +285,7 @@ class SummaryOperator(BaseOperator):
         from hybrid_rag.storage.qdrant_client import qdrant_client
 
         try:
-            q_vec = embedder.embed(sub_query)
+            q_vec = await _embed_async(sub_query)
             results = await qdrant_client.search_summaries(q_vec, limit=settings.community_search_limit)
             logger.info("summary_results", count=len(results))
             return results
@@ -311,7 +318,7 @@ class CommunitySearchOperator(BaseOperator):
             [ctx["doc_id"]] if ctx.get("doc_id") else None
         )
         try:
-            q_vec = embedder.embed(sub_query)
+            q_vec = await _embed_async(sub_query)
             results = await qdrant_client.search_communities(q_vec, doc_ids=doc_ids, limit=settings.community_search_limit)
             logger.info("community_search_results", count=len(results))
             return results

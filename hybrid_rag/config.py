@@ -48,7 +48,8 @@ class Settings(BaseSettings):
 
     # ── Groq ───────────────────────────────────────────────────────────────────
     groq_api_key: str
-    groq_llm_model: str = "llama-3.3-70b-versatile"
+    groq_llm_model: str = "llama-3.3-70b-versatile"  # answering — quality matters
+    groq_fast_model: str = "llama-3.1-8b-instant"     # planning/routing — speed matters
     # Groq does not offer embeddings — we use sentence-transformers locally
     groq_embed_model: str = "all-MiniLM-L6-v2"   # local ST model
 
@@ -67,7 +68,10 @@ class Settings(BaseSettings):
 
     # ── Retrieval ──────────────────────────────────────────────────────────────
     rrf_k: int = 60
+    retrieval_top_k: int = 10           # max chunks fetched from Qdrant / Neo4j
+    rerank_top_k: int = 4               # chunks kept after cross-encoder reranking → LLM context
     community_search_limit: int = 3     # top-N community summaries per doc in GLOBAL path
+    plan_cache_size: int = 256          # max KAG query plans cached in RAM
 
     # ── Qdrant collection names ────────────────────────────────────────────────
     qdrant_chunks_collection: str = "chunks"

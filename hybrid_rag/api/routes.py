@@ -185,11 +185,18 @@ async def query(req: QueryRequest) -> QueryResponse:
                 vector_hits=len(vec_list),
                 merged_total=len(all_results),
             )
+            # Rerank non-community results; keep community summaries intact
+            from hybrid_rag.retrieval.reranker import rerank
+            community_r = [r for r in all_results if r.result_type == "community"]
+            chunk_r     = [r for r in all_results if r.result_type != "community"]
+            chunk_r = await rerank(req.query, chunk_r) if chunk_r else chunk_r
+            all_results = community_r + chunk_r
             context = build_context(all_results, query=req.query)
             answer = await _llm_answer(context)
             sources = _extract_sources(all_results)
         # ── KAG_SIMPLE — single HYBRID step ───────────────────────────────────
         elif path == "KAG_SIMPLE":
+            from hybrid_rag.retrieval.reranker import rerank
             logger.debug("kag_simple_path", query=req.query[:80])
             op = get_operator("HYBRID")
             results = await op.run(req.query, {
@@ -197,6 +204,7 @@ async def query(req: QueryRequest) -> QueryResponse:
                 "doc_ids": req.doc_ids or None,
             })
             logger.debug("kag_simple_results", hits=len(results))
+            results = await rerank(req.query, results)   # keep top rerank_top_k
             context = build_context(results, query=req.query)
             answer = await _llm_answer(context)
             sources = _extract_sources(results)
@@ -257,7 +265,9 @@ async def query(req: QueryRequest) -> QueryResponse:
                     reasoning_steps.append(f"Step {step.step_id} [{step.operator}]: {step.sub_query}")
                     remaining.remove(step)
 
-            # Final answer via LLM
+            # Rerank before final LLM call
+            from hybrid_rag.retrieval.reranker import rerank
+            all_results = await rerank(req.query, all_results)
             context = build_context(
                 all_results,
                 reasoning_steps=reasoning_steps,

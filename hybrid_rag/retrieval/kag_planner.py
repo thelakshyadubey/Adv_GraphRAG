@@ -5,14 +5,21 @@ The plan specifies which operators to run in which order, with dependency tracki
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List
 
 import structlog
 
 from hybrid_rag.config import settings
 from hybrid_rag.storage.schema import OperatorType, PlanStep, QueryPlan
+
+# ── In-process plan cache ─────────────────────────────────────────────────────
+# Key: sha256(normalised query)[:32]  Value: QueryPlan
+# Avoids the 2-3s Groq planning call for repeated or structurally identical queries.
+_plan_cache: OrderedDict[str, QueryPlan] = OrderedDict()
 
 logger = structlog.get_logger(__name__)
 
@@ -60,7 +67,7 @@ def _call_groq(prompt: str) -> str:
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             resp = client.chat.completions.create(
-                model=settings.groq_llm_model,
+                model=settings.groq_fast_model,   # use fast model — planning needs speed not quality
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=512,
@@ -95,8 +102,14 @@ def _validate_no_circular(steps: List[PlanStep]) -> bool:
 def plan(query: str) -> QueryPlan:
     """
     Decompose query into a QueryPlan.
+    Checks in-process plan cache first to skip the Groq call on repeated queries.
     Falls back to single HYBRID step on any parse/validation failure.
     """
+    cache_key = hashlib.sha256(query.strip().lower().encode()).hexdigest()[:32]
+    if cache_key in _plan_cache:
+        logger.info("plan_cache_hit", query=query[:80])
+        return _plan_cache[cache_key]
+
     prompt = PLANNER_PROMPT.format(query=query)
     raw = ""
     try:
@@ -127,8 +140,12 @@ def plan(query: str) -> QueryPlan:
             logger.warning("circular_dep_in_plan_fallback")
             return _safe_fallback(query)
 
+        result = QueryPlan(original_query=query, steps=steps)
+        _plan_cache[cache_key] = result
+        if len(_plan_cache) > settings.plan_cache_size:
+            _plan_cache.popitem(last=False)   # evict oldest
         logger.info("plan_created", steps=len(steps))
-        return QueryPlan(original_query=query, steps=steps)
+        return result
 
     except Exception as exc:
         logger.warning("planner_fallback", error=str(exc), raw=raw[:200])
