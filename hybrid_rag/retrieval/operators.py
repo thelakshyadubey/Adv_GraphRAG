@@ -34,6 +34,18 @@ async def _embed_async(text: str) -> list:
     return await loop.run_in_executor(None, embedder.embed, text)
 
 
+def _safe_doc_ids(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """Extract doc_ids from context, filtering out any None values.
+    Returns None (= no filter) if the result is empty."""
+    raw: Optional[List] = ctx.get("doc_ids") or (
+        [ctx["doc_id"]] if ctx.get("doc_id") else None
+    )
+    if not raw:
+        return None
+    filtered = [d for d in raw if d is not None]
+    return filtered if filtered else None
+
+
 def _groq_client():
     from groq import Groq  # type: ignore
     return Groq(api_key=settings.groq_api_key)
@@ -77,41 +89,49 @@ class GraphExactOperator(BaseOperator):
         from qdrant_client.http import models as qm  # type: ignore
 
         ctx = context or {}
-        doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
-            [ctx["doc_id"]] if ctx.get("doc_id") else None
-        )
+        doc_ids = _safe_doc_ids(ctx)
 
         try:
             entities: List[Entity] = await neo4j_client.search_by_name(sub_query, fuzzy=True)
             if not entities:
                 return []
 
-            results: List[RetrievalResult] = []
+            # Collect all (entity, chunk_id) pairs first
+            entity_chunk_pairs: List[tuple] = []
             for entity in entities[:5]:
                 chunk_ids = await neo4j_client.get_chunks_for_node(entity.node_id)
                 for cid in chunk_ids[:3]:
-                    # Fetch chunk text from Qdrant filtered by chunk_id AND doc scope
-                    must = [qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))]
-                    if doc_ids:
-                        must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids)))
-                    flt = qm.Filter(must=must)
-                    records, _ = await qdrant_client._client.scroll(
-                        collection_name=settings.qdrant_chunks_collection,
-                        scroll_filter=flt,
-                        limit=1,
-                        with_payload=True,
-                        with_vectors=False,
-                    )
-                    for rec in records:
-                        p = rec.payload or {}
-                        results.append(RetrievalResult(
-                            id=cid,
-                            text=p.get("text", ""),
-                            score=0.9,
-                            source_doc=p.get("doc_id"),
-                            source_page=p.get("page"),
-                            node_ids=[entity.node_id],
-                        ))
+                    entity_chunk_pairs.append((entity, cid))
+
+            # Fetch all chunks from Qdrant IN PARALLEL instead of sequentially
+            async def _fetch_chunk(entity, cid):
+                must = [qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))]
+                if doc_ids:
+                    must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids)))
+                flt = qm.Filter(must=must)
+                records, _ = await qdrant_client._client.scroll(
+                    collection_name=settings.qdrant_chunks_collection,
+                    scroll_filter=flt, limit=1,
+                    with_payload=True, with_vectors=False,
+                )
+                out = []
+                for rec in records:
+                    p = rec.payload or {}
+                    out.append(RetrievalResult(
+                        id=cid, text=p.get("text", ""), score=0.9,
+                        source_doc=p.get("doc_id"), source_page=p.get("page"),
+                        node_ids=[entity.node_id],
+                    ))
+                return out
+
+            fetches = await asyncio.gather(
+                *[_fetch_chunk(e, cid) for e, cid in entity_chunk_pairs],
+                return_exceptions=True,
+            )
+            results: List[RetrievalResult] = []
+            for r in fetches:
+                if isinstance(r, list):
+                    results.extend(r)
 
             logger.info("graph_exact_results", count=len(results))
             return results
@@ -137,9 +157,7 @@ class VectorSearchOperator(BaseOperator):
         effective_limit = limit if limit is not None else settings.retrieval_top_k
         try:
             q_vec = await _embed_async(sub_query)
-            doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
-                [ctx["doc_id"]] if ctx.get("doc_id") else None
-            )
+            doc_ids = _safe_doc_ids(ctx)
             results = await qdrant_client.search_chunks(
                 q_vec, doc_ids=doc_ids, limit=effective_limit
             )
@@ -183,15 +201,13 @@ class HybridOperator(BaseOperator):
             original_ids = [r.id for r in merged[:10]]
             expanded_ids = await expand(original_ids)
 
-            # Fetch expanded chunks from Qdrant (best effort)
+            # Fetch expanded chunks from Qdrant IN PARALLEL
             from hybrid_rag.storage.qdrant_client import qdrant_client
             from qdrant_client.http import models as qm  # type: ignore
             ctx = context or {}
-            doc_ids_ctx: Optional[List[str]] = ctx.get("doc_ids") or (
-                [ctx["doc_id"]] if ctx.get("doc_id") else None
-            )
-            extra: List[RetrievalResult] = []
-            for cid in expanded_ids[:5]:
+            doc_ids_ctx = _safe_doc_ids(ctx)
+
+            async def _fetch_expanded(cid):
                 must = [qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))]
                 if doc_ids_ctx:
                     must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids_ctx)))
@@ -200,13 +216,24 @@ class HybridOperator(BaseOperator):
                     collection_name=settings.qdrant_chunks_collection, scroll_filter=flt,
                     limit=1, with_payload=True, with_vectors=False,
                 )
-                for rec in records:
-                    p = rec.payload or {}
-                    extra.append(RetrievalResult(
-                        id=cid, text=p.get("text", ""), score=0.5,
-                        source_doc=p.get("doc_id"), source_page=p.get("page"),
-                        node_ids=p.get("node_ids", []),
-                    ))
+                return [
+                    RetrievalResult(
+                        id=cid, text=(rec.payload or {}).get("text", ""), score=0.5,
+                        source_doc=(rec.payload or {}).get("doc_id"),
+                        source_page=(rec.payload or {}).get("page"),
+                        node_ids=(rec.payload or {}).get("node_ids", []),
+                    )
+                    for rec in records
+                ]
+
+            expanded_fetches = await asyncio.gather(
+                *[_fetch_expanded(cid) for cid in expanded_ids[:5]],
+                return_exceptions=True,
+            )
+            extra: List[RetrievalResult] = []
+            for r in expanded_fetches:
+                if isinstance(r, list):
+                    extra.extend(r)
 
             final = rrf_merge([merged, extra]) if extra else merged
             logger.info("hybrid_results", count=len(final))
@@ -237,7 +264,6 @@ class MultiHopOperator(BaseOperator):
                 hops = await neo4j_client.multi_hop(e.node_id, depth=3)
                 all_hops.extend(hops)
 
-            # Collect chunk texts reachable via hops
             q_vec = await _embed_async(sub_query)
             results: List[RetrievalResult] = []
             hop_chunk_ids: set[str] = set()
@@ -247,9 +273,7 @@ class MultiHopOperator(BaseOperator):
 
             from qdrant_client.http import models as qm  # type: ignore
             ctx = context or {}
-            doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
-                [ctx["doc_id"]] if ctx.get("doc_id") else None
-            )
+            doc_ids = _safe_doc_ids(ctx)
             for cid in list(hop_chunk_ids)[:10]:
                 must = [qm.FieldCondition(key="chunk_id", match=qm.MatchValue(value=cid))]
                 if doc_ids:
@@ -314,9 +338,7 @@ class CommunitySearchOperator(BaseOperator):
         from hybrid_rag.storage.qdrant_client import qdrant_client
 
         ctx = context or {}
-        doc_ids: Optional[List[str]] = ctx.get("doc_ids") or (
-            [ctx["doc_id"]] if ctx.get("doc_id") else None
-        )
+        doc_ids = _safe_doc_ids(ctx)
         try:
             q_vec = await _embed_async(sub_query)
             results = await qdrant_client.search_communities(q_vec, doc_ids=doc_ids, limit=settings.community_search_limit)
