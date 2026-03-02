@@ -38,12 +38,35 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown using the modern lifespan API."""
+    import asyncio as _asyncio
     # ── Startup ───────────────────────────────────────────────────────────────
     from hybrid_rag.storage.neo4j_client import neo4j_client
     from hybrid_rag.storage.qdrant_client import qdrant_client
     from hybrid_rag.storage.cache_manager import cache_manager
 
     logger.info("startup_begin")
+
+    # Warm up embedding model and cross-encoder BEFORE taking the first request.
+    # Both load from local disk/HuggingFace cache — takes 5-35s on first run.
+    # Running them in executors here means zero cold-start delay on queries.
+    async def _warmup_models():
+        loop = _asyncio.get_event_loop()
+        try:
+            from hybrid_rag.ingestion.embedder import _get_model
+            await loop.run_in_executor(None, _get_model)
+            logger.info("embedding_model_ready")
+        except Exception as exc:
+            logger.warning("embedding_model_warmup_failed", error=str(exc))
+        try:
+            from hybrid_rag.retrieval.reranker import _get_cross_encoder
+            await loop.run_in_executor(None, _get_cross_encoder)
+            logger.info("cross_encoder_ready")
+        except Exception as exc:
+            logger.warning("cross_encoder_warmup_failed", error=str(exc))
+
+    # Start model warmup and storage connections concurrently
+    warmup_task = _asyncio.create_task(_warmup_models())
+
     try:
         await neo4j_client.connect()
     except Exception as exc:
@@ -59,6 +82,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("cache_startup_failed", error=str(exc))
 
+    await warmup_task   # ensure models are loaded before accepting requests
     logger.info("startup_complete")
 
     yield  # ← application runs here
